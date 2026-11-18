@@ -1,0 +1,1649 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cluster monitor</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #dfe3e8; --text: #1b1f24; --muted: #667080;
+  --accent: #2f6fde; --danger: #c93a3a; --danger-bg: #fdecec;
+  --run: #1f8a4c; --run-bg: #e3f5ea; --wait: #a86a00; --wait-bg: #fdf1d8;
+  --done: #3b5b8c; --done-bg: #e6edf8; --fail: #b3261e; --fail-bg: #fbe5e3; --off: #667080; --off-bg: #eceff3;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --panel-w: min(760px, 50vw);
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b; --panel: #1c2026; --line: #2d333b; --text: #e4e8ee; --muted: #8e99a8;
+    --accent: #6ea0ff; --danger: #ff7b72; --danger-bg: #3a1d1d;
+    --run: #5fd38d; --run-bg: #16321f; --wait: #f0b849; --wait-bg: #3a2c0c;
+    --done: #9db8e6; --done-bg: #1d2a40; --fail: #ff8a80; --fail-bg: #3d1a18; --off: #8e99a8; --off-bg: #262b32;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+a { color: var(--accent); }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 10px 20px;
+  background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+h1 { font-size: 16px; margin: 0; user-select: none; }
+#mark { color: var(--run); }
+h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+main { padding: 16px 20px 40px; display: grid; gap: 16px; max-width: 1600px; margin: 0 auto; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.grow { flex: 1; }
+.muted { color: var(--muted); }
+.note { color: var(--muted); font-size: 12px; margin: 0; padding: 8px 14px; }
+.scroll { overflow-x: auto; }
+.scroll, .side .body, pre { scrollbar-color: var(--muted) var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-weight: 600; color: var(--muted); font-size: 12px; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr.pick { cursor: pointer; }
+tbody tr.pick:hover, tbody tr.open { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.id { font-family: var(--mono); }
+td.name { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+td.empty { color: var(--muted); padding: 18px 14px; white-space: normal; }
+td.wrap { white-space: normal; overflow-wrap: anywhere; }
+#files td.act { text-align: right; }
+#files td.act button { margin-left: 4px; }
+#queue td.act { position: sticky; right: 0; background: var(--panel); box-shadow: -8px 0 8px -8px rgba(0,0,0,.25); }
+button, select, input[type=text], input[type=password] { font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+button.danger:hover { background: var(--danger-bg); border-color: var(--danger); }
+button.small { padding: 2px 8px; font-size: 12px; }
+button.link { border: 0; background: none; padding: 0; color: var(--accent); max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; text-align: left; vertical-align: bottom; }
+button.link.plain { color: inherit; font-family: inherit; }
+button.link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pill, .badge { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 600; }
+.badge + .badge { margin-left: 4px; }
+.s-run { color: var(--run); background: var(--run-bg); }
+.s-wait { color: var(--wait); background: var(--wait-bg); }
+.s-done { color: var(--done); background: var(--done-bg); }
+.s-fail { color: var(--fail); background: var(--fail-bg); }
+.s-fail-text { color: var(--fail); }
+.s-off { color: var(--off); background: var(--off-bg); }
+nav { display: flex; gap: 2px; }
+nav button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 12px; color: var(--muted); font-weight: 600; }
+nav button.on { color: var(--text); border-bottom-color: var(--accent); }
+#banner { margin: 16px 20px 0; padding: 12px 14px; border-radius: 8px; background: var(--wait-bg); color: var(--wait); }
+#banner code, .path { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.side { position: fixed; top: 0; right: 0; bottom: 0; width: var(--panel-w); background: var(--panel);
+  border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.18); z-index: 3; display: flex; flex-direction: column; }
+body.split header, body.split main { margin-right: var(--panel-w); }
+body.split #banner { margin-right: calc(var(--panel-w) + 20px); }
+@media (max-width: 1000px) {
+  .side { width: 100%; }
+  body.split header, body.split main { margin-right: 0; }
+  body.split #banner { margin-right: 20px; }
+}
+.side .body { flex: 1; overflow: auto; padding: 12px 14px; }
+.tabs { display: flex; gap: 4px; padding: 8px 14px 0; border-bottom: 1px solid var(--line); }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 10px; color: var(--muted); }
+.tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+pre { margin: 0; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.meter { display: inline-block; width: 120px; height: 8px; border-radius: 4px; background: var(--off-bg); vertical-align: middle; overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--run); }
+.meter.warn i { background: var(--wait); }
+.meter.full i { background: var(--fail); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); border-bottom: 1px solid var(--line); overflow: hidden; }
+.tile { padding: 10px 14px; box-shadow: 1px 0 0 var(--line), 0 1px 0 var(--line); }
+.tile b { display: block; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile span { color: var(--muted); font-size: 12px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); overflow: hidden; }
+.card { padding: 12px 14px; display: grid; gap: 6px; align-content: start; box-shadow: 1px 0 0 var(--line), 0 1px 0 var(--line); }
+.card .meter { width: 100%; }
+.card strong { font-size: 14px; }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 14px; font-size: 13px; margin: 0 0 14px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; font-family: var(--mono); font-size: 12px; }
+dialog { width: min(560px, 92vw); padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); }
+dialog::backdrop { background: rgba(0, 0, 0, .45); }
+dialog .body { padding: 4px 14px 12px; }
+dialog ol { margin: 8px 0; padding-left: 22px; }
+dialog li { margin: 4px 0; }
+dialog .actions { display: flex; gap: 8px; }
+#usage-token { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; -webkit-text-security: disc; }
+#toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); max-width: 90%; padding: 9px 14px;
+  border-radius: 8px; background: var(--text); color: var(--bg); z-index: 4; font-size: 13px; }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.cols > div + div { border-left: 1px solid var(--line); }
+@media (max-width: 800px) { .cols { grid-template-columns: 1fr; } .cols > div + div { border-left: 0; border-top: 1px solid var(--line); } }
+details { padding: 8px 14px; }
+tr.fold { cursor: pointer; background: color-mix(in srgb, var(--muted) 7%, transparent); }
+tr.fold td { white-space: normal; }
+tr.fold .meter { display: inline-flex; width: 160px; margin: 0 8px; }
+tr.member td.id { padding-left: 24px; }
+.meter i.part { flex: none; }
+.meter i.wait { background: var(--wait); } .meter i.done { background: var(--done); } .meter i.bad { background: var(--fail); }
+#d-pattern { flex: 1; min-width: 180px; font-family: var(--mono); font-size: 12px; }
+#rain { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 5; }
+#rain .badge { position: absolute; top: -40px; animation: fall linear forwards; }
+@keyframes fall { to { transform: translateY(calc(100vh + 80px)) rotate(var(--turn)); } }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); gap: 16px; }
+.plot { position: relative; padding-top: 8px; }
+.plot svg { display: block; }
+.plot text { font: 11px system-ui, sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.plot .rule { stroke: var(--line); stroke-width: 1; shape-rendering: crispEdges; }
+.plot .curve { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.plot .dot { stroke: var(--panel); stroke-width: 2; }
+.plot .cross { stroke: var(--muted); stroke-width: 1; }
+.tip { position: absolute; top: 12px; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.18); white-space: nowrap; z-index: 1; }
+.tip div + div { margin-top: 2px; }
+.tip b, .legend b { font-variant-numeric: tabular-nums; }
+.key { display: inline-block; width: 14px; border-top: 3px solid; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 24px; padding: 6px 14px 4px; font-size: 13px; }
+.legend b { margin-left: 6px; }
+.chart details { padding-top: 2px; }
+.chart details .scroll { max-height: 220px; overflow-y: auto; margin-top: 6px; }
+.rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); overflow: hidden; }
+.ringcard { padding: 12px 14px; display: grid; gap: 8px; box-shadow: 1px 0 0 var(--line), 0 1px 0 var(--line); }
+.ringrow { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+.ring { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.ring svg text { font: 600 14px system-ui, sans-serif; fill: var(--text); }
+.ring .track { stroke: var(--off-bg); } .ring .arc { stroke: var(--run); }
+.ring.warn .arc { stroke: var(--wait); } .ring.full .arc { stroke: var(--fail); }
+summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="mark" title="A job is running" hidden>▶ </span>Cluster monitor</h1>
+  <span id="version" class="muted"></span>
+  <span id="conn" class="pill s-off">checking</span>
+  <nav id="views">
+    <button data-view="jobs" class="on">Jobs</button><button data-view="resources">Resources</button><button data-view="storage">Storage</button><button data-view="cluster">Cluster</button>
+  </nav>
+  <span class="grow"></span>
+  <label class="muted">Auto-refresh
+    <select id="interval">
+      <option value="0">off</option><option value="10">10 s</option>
+      <option value="20" selected>20 s</option><option value="60">60 s</option>
+    </select>
+  </label>
+  <button id="notify" title="A message of the browser when a job starts, ends, fails or is requeued, read from the queue this page already asks for">Alerts : off</button>
+  <button id="refresh">Refresh now</button>
+  <span id="stamp" class="muted"></span>
+</header>
+
+<div id="banner" hidden></div>
+
+<main id="view-jobs">
+  <section>
+    <div class="bar">
+      <h2>Queue</h2><span id="queue-count" class="muted"></span><span class="grow"></span>
+      <button id="kill-selected" class="danger" disabled>Kill selected</button>
+      <button id="kill-pending" class="danger">Kill pending</button>
+      <button id="kill-all" class="danger">Kill all</button>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th><input type="checkbox" id="pick-all" aria-label="Select all"></th><th>Job</th><th>Name</th><th>Partition</th>
+        <th>State</th><th class="num">Elapsed</th><th class="num">Left</th><th title="In the time zone of this computer">Start</th><th class="num">CPUs</th><th class="num">Memory</th>
+        <th>GPU</th><th title="Running : the node. Pending : why it waits. Priority = other jobs are ahead ; Resources = it is next and waits for free resources ; ReqNodeNotAvail = the nodes it asks for are down or reserved, it only has to wait ; QOS…Limit, AssocGrp… = a per-user limit is reached ; JobHeldUser = held (Release in the job panel) ; BeginTime = its start date is not reached">Node / reason</th><th></th></tr></thead>
+      <tbody id="queue"></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <div class="bar">
+      <h2>Finished</h2><span id="history-count" class="muted"></span><span class="grow"></span>
+      <button id="usage" class="small" hidden title="The occupancy of the GPUs of the finished jobs comes from the usage service of the cluster, which asks for a personal token">GPU occupancy : set the token</button>
+      <input type="text" id="filter" placeholder="Filter by name, state or id" aria-label="Filter finished jobs">
+      <select id="days" aria-label="Period">
+        <option value="1">last day</option><option value="3">3 days</option>
+        <option value="7">7 days</option><option value="30">30 days</option>
+      </select>
+    </div>
+    <div class="tiles" id="summary"></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Job</th><th>Name</th><th>Partition</th><th>State</th><th>Exit</th><th class="num">Elapsed</th>
+        <th class="num" title="Share of the time limit that was used">of limit</th>
+        <th class="num" title="Peak memory of the steps (MaxRSS) against the memory allocated to the job (mem of AllocTRES ; ReqMem without it)">Memory peak / asked</th>
+        <th class="num" title="CPU time used / (elapsed × allocated CPUs) ; recorded when a step ends, so not for a running job">CPU use</th>
+        <th class="num" title="Time between submission and start">Waited</th>
+        <th title="In the time zone of this computer">Ended</th><th>Node</th><th class="num">CPUs</th><th class="num">GPUs</th>
+        <th class="num" id="occupancy-head" hidden>GPU occupancy</th></tr></thead>
+      <tbody id="history"></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <div class="bar"><h2>Sizing of recurring jobs</h2><span id="advice-count" class="muted"></span></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Name</th><th class="num" title="Jobs of this name in the period ; the figures come from the completed ones">Jobs</th>
+        <th class="num" title="Largest memory peak of the completed jobs against the memory allocated">Memory peak / asked</th><th title="Peak + 20 %, when it is at most 80 % of the request">Ask</th>
+        <th class="num" title="Longest completed run against the time limit">Longest / limit</th><th title="Longest run + 25 %, when it is at most 80 % of the limit">Ask</th>
+        <th class="num" title="CPUs in use (CPU time / elapsed, largest of the completed jobs) against the CPUs allocated">CPUs used / allocated</th><th title="Use + 20 %, when it is at most 80 % of the allocation">Ask</th>
+        <th>Notes</th></tr></thead>
+      <tbody id="advice"></tbody>
+    </table></div>
+    <p class="note">From the finished jobs of the period, grouped by name. A suggestion is a starting point : it knows the runs of this period only, and not the GPU memory.</p>
+  </section>
+</main>
+
+<main id="view-resources" hidden>
+  <section>
+    <div class="bar">
+      <h2>Resources</h2>
+      <select id="res-range" aria-label="Period of the graphs">
+        <option value="0">live · last hour</option><option value="-6">live · last 6 hours</option><option value="-24">live · last 24 hours</option><option value="1">last day</option><option value="3">3 days</option>
+        <option value="7">7 days</option><option value="30">30 days</option>
+      </select>
+      <span id="res-stamp" class="muted"></span><span class="grow"></span>
+      <label class="muted" title="Off : a sample is taken only while this view is open. On : the server takes one at the chosen pace, this view or the page open or not, until it stops or this is set back to off — two squeue and one sstat on the login node each time">Background sampling
+        <select id="res-background">
+          <option value="0">off</option><option value="30">every 30 s</option><option value="60">every minute</option><option value="120">every 2 min</option>
+          <option value="300">every 5 min</option><option value="600">every 10 min</option>
+        </select>
+      </label>
+      <button id="res-gpus" class="small" title="Runs nvidia-smi once inside each running job that holds a GPU (4 jobs at most) : like the GPU tab of a job, it adds a step to the job">Read GPU load now</button>
+    </div>
+    <p class="note" id="res-note"></p>
+  </section>
+  <div class="charts" id="charts"></div>
+  <section>
+    <div class="bar"><h2>Storage</h2><span class="grow"></span><button id="res-storage-refresh" class="small">Refresh</button></div>
+    <div class="rings" id="rings"><div class="ringcard muted">Loading</div></div>
+  </section>
+</main>
+
+<main id="view-storage" hidden>
+  <section>
+    <div class="bar"><h2>Storage areas</h2><span class="grow"></span><button id="storage-refresh" class="small">Refresh</button></div>
+    <div class="cards" id="areas"><div class="card muted">Loading</div></div>
+    <details id="quota-box"><summary>Raw output of the quota command of the cluster</summary><pre id="quota" class="muted">–</pre></details>
+  </section>
+  <section>
+    <div class="bar">
+      <h2>Files</h2><span id="crumbs" class="crumbs"></span><span id="files-mode" class="muted" hidden></span><span class="grow"></span>
+      <button id="measure" class="small" title="Counts the files below this directory ; stopped after a few seconds">Measure this directory</button>
+      <label class="muted">Unused for
+        <select id="unused-days" aria-label="Days unused"><option>30</option><option selected>60</option><option>80</option></select> days
+      </label>
+      <button id="unused" class="small" title="Files neither read nor modified for that long ; stopped after a few seconds">Find</button>
+    </div>
+    <div class="bar" id="files-tools" hidden>
+      <button id="new-folder" class="small">New folder</button>
+      <button id="move-selected" class="small" disabled>Move selected…</button>
+      <button id="delete-selected" class="small danger" disabled>Delete selected</button>
+      <span id="clip" hidden><span id="clip-text" class="muted"></span>
+        <button id="move-here" class="small">Move here</button> <button id="move-cancel" class="small">Cancel</button></span>
+    </div>
+    <p class="note" id="files-note" hidden></p>
+    <div class="scroll"><table>
+      <thead><tr><th><input type="checkbox" id="files-all" aria-label="Select all"></th><th>Name</th><th class="num">Size</th><th>Modified</th><th>Last read</th>
+        <th class="num" title="Days since the file was last read or modified">Unused</th><th></th></tr></thead>
+      <tbody id="files"><tr><td class="empty" colspan="7">Choose a storage area above.</td></tr></tbody>
+    </table></div>
+  </section>
+</main>
+
+<main id="view-cluster" hidden>
+  <section>
+    <div class="bar"><h2>My account</h2><span class="grow"></span><button id="cluster-refresh" class="small">Refresh</button></div>
+    <div class="tiles" id="account"><div class="tile muted">Loading</div></div>
+    <p class="note">Fair-share goes from 0 to 1 : the more the account has used recently (half-life of a week), the lower it is and the
+      later its pending jobs start. <span id="cluster-note"></span></p>
+  </section>
+  <section>
+    <div class="cols">
+      <div>
+        <div class="bar"><h2>Free GPUs</h2></div>
+        <div class="scroll"><table>
+          <thead><tr><th>GPU</th><th class="num">Free</th><th class="num">Total</th><th>Free share</th></tr></thead>
+          <tbody id="gpus"></tbody>
+        </table></div>
+      </div>
+      <div>
+        <div class="bar"><h2>Partitions</h2></div>
+        <div class="scroll"><table>
+          <thead><tr><th>Partition</th><th class="num">Max time</th><th title="Per user, summed over the running jobs of the partition">Limit per user</th>
+            <th class="num">Idle nodes</th><th title="My running jobs in the partition">Mine now</th></tr></thead>
+          <tbody id="partitions"></tbody>
+        </table></div>
+      </div>
+    </div>
+  </section>
+  <section>
+    <div class="bar"><h2>Elsewhere</h2></div>
+    <p class="note" id="links"></p>
+  </section>
+</main>
+
+<aside id="detail" class="side" hidden>
+  <div class="bar">
+    <strong id="d-title"></strong><span id="d-state"></span><span class="grow"></span>
+    <button id="d-close">Close</button>
+  </div>
+  <div class="bar" id="d-actions"></div>
+  <div class="tabs" id="d-tabs">
+    <button data-tab="output" class="on">Output</button><button data-tab="info">Details</button>
+    <button data-tab="usage">Usage</button><button data-tab="gpu">GPU</button><button data-tab="metric">Metric</button>
+  </div>
+  <div class="bar" id="d-metricbar" hidden>
+    <label class="muted" for="d-pattern">Pattern</label>
+    <input type="text" id="d-pattern" spellcheck="false" title="A regular expression applied, in this page, to the last 2000 lines of the output : the value is its first group, or the whole match">
+  </div>
+  <div class="bar" id="d-outbar">
+    <select id="d-stream" aria-label="Stream"><option value="out">stdout</option><option value="err">stderr</option></select>
+    <select id="d-lines" aria-label="Lines"><option>100</option><option selected>300</option><option>1000</option><option>2000</option></select>
+    <span id="d-path" class="path muted"></span>
+  </div>
+  <div class="body" id="d-body"></div>
+</aside>
+
+<aside id="preview" class="side" hidden>
+  <div class="bar">
+    <strong id="p-title"></strong><span id="p-size" class="muted"></span><span class="grow"></span>
+    <select id="p-end" aria-label="Part of the file"><option value="tail">end</option><option value="head">beginning</option></select>
+    <button id="p-download">Download</button><button id="p-delete" class="danger">Delete</button>
+    <button id="p-close">Close</button>
+  </div>
+  <div class="bar"><span id="p-path" class="path muted"></span></div>
+  <div class="body" id="p-body"></div>
+</aside>
+
+<dialog id="usage-box" aria-labelledby="usage-title">
+  <div class="bar"><h2 id="usage-title">Token of the usage service (GPU occupancy)</h2><span class="grow"></span><button id="usage-close" class="small">Close</button></div>
+  <div class="body">
+    <p id="usage-what"></p>
+    <ol>
+      <li id="usage-open">Open <a id="usage-link" target="_blank" rel="noopener noreferrer"></a> <span id="usage-sign"></span> and copy the value of <code id="usage-field"></code>.</li>
+      <li>Paste it below and press Save.</li>
+    </ol>
+    <input type="text" id="usage-token" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Token of the usage service">
+    <p id="usage-state" role="status" aria-live="polite"></p>
+    <p class="muted" id="usage-where"></p>
+    <div class="actions"><button id="usage-save">Save</button><button id="usage-forget" class="danger" hidden>Forget the token</button></div>
+  </div>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite" hidden></div>
+
+<script>
+"use strict";
+const $ = (selector) => document.querySelector(selector);
+// What the server says of the cluster (its file, `--site`) : until its first answer, and with an older server, a cluster of which nothing is known.
+const SITE = { name: "", connect: "In a terminal run `ssh {host}`, log in, then press Refresh now.", uses: {}, backup: {}, purge: {}, remind: {}, notes: {}, shared: [], links: [], hints: [], usage: null };
+const site = () => state.site || SITE;
+// A text of the site with its `{host}` and `{node}` filled, its `backquoted` parts as code.
+function sited(text, values = {}) {
+  const fill = (part) => part.replace(/\{(host|node)\}/g, (_, name) => values[name] ?? "");
+  return String(text ?? "").split("`").map((part, index) => (index % 2 ? el("code", {}, fill(part)) : fill(part)));
+}
+
+// Token : read once from the address printed by server.py, kept for the tab, removed from the address bar.
+const token = (() => {
+  const match = location.hash.match(/t=([\w-]+)/);
+  try {
+    if (match) { sessionStorage.setItem("token", match[1]); history.replaceState(null, "", location.pathname); }
+    return (match && match[1]) || sessionStorage.getItem("token") || "";
+  } catch (error) { return match ? match[1] : ""; }
+})();
+
+// A new address pasted in this tab only changes the fragment : reload to take its token.
+window.addEventListener("hashchange", () => { if (/t=[\w-]+/.test(location.hash)) location.reload(); });
+
+const state = { queue: [], history: [], summary: null, unfolded: new Set(), rated: new Map(), picked: new Set(), open: null, tab: "output", view: "jobs",
+  timer: null, busy: false, host: "", dir: null, file: null, loaded: {},
+  writable: false, actions: true, site: null, items: new Map(), chosen: new Set(), clip: [],
+  touched: Date.now(), paused: false };
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "class") node.className = value; else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (value !== false && value != null) node.setAttribute(key, value === true ? "" : value);
+  }
+  for (const child of children.flat(Infinity)) if (child != null) node.append(child);
+  return node;
+}
+
+// Every call is a POST to a fixed path, its arguments in the body : nothing a content blocker can match in the address.
+async function request(path, args = {}) {
+  const options = { method: "POST", headers: { "X-Auth": token, "Content-Type": "application/json" }, body: JSON.stringify(args) };
+  let response;
+  try { response = await fetch(path, options); }
+  catch (error) { throw Object.assign(new Error("no answer from the local server"), { status: 0 }); }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw Object.assign(new Error(data.error || response.statusText), { status: response.status });
+  }
+  return response;
+}
+const api = async (path, args) => (await request(path, args)).json();
+
+function toast(text) {
+  const box = $("#toast"); box.textContent = text; box.hidden = false;
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => { box.hidden = true; }, 4500);
+}
+
+function banner(nodes) { const box = $("#banner"); box.replaceChildren(...[].concat(nodes || [])); box.hidden = !nodes; }
+
+function fail(error) {
+  if (error.status === 503) {
+    $("#conn").className = "pill s-fail"; $("#conn").textContent = "not connected";
+    banner([ "No open SSH connection to the cluster. ", ...sited(site().connect, { host: state.host || "the login node" }),
+      ...(state.sharing ? [" ", ...sited(state.sharing)] : []) ]);
+  } else if (error.status === 403) {
+    banner("Access token missing or outdated : open the address printed by server.py in the terminal.");
+  } else if (error.status === 0) {
+    $("#conn").className = "pill s-fail"; $("#conn").textContent = "server stopped";
+    banner([ "The local server does not answer : it was stopped (start ", el("code", {}, "python3 server.py"),
+      " again and open the new address), or a browser extension blocked the request." ]);
+  } else { toast("Request failed : " + error.message); }
+}
+
+/* ---------- formats ---------- */
+
+function stateClass(name) {
+  if (name === "RUNNING" || name === "COMPLETING") return "s-run";
+  if (name === "PENDING" || name === "CONFIGURING" || name === "REQUEUED" || name === "SUSPENDED") return "s-wait";
+  if (name === "COMPLETED") return "s-done";
+  if (name === "CANCELLED" || name === "PREEMPTED") return "s-off";
+  return "s-fail";
+}
+const badge = (name, kind) => el("span", { class: "badge " + (kind || stateClass(name)) }, name.toLowerCase().replaceAll("_", " "));
+const gres = (text) => (!text || text === "N/A") ? "–" : text.replace(/^gres[:/]/, "").replace(/^gpu:/, "");
+// Job dates come in seconds since the epoch and are shown, like the file dates, in the time zone of this computer.
+const stamp = (value) => /^\d+$/.test(String(value ?? "")) ? (Number(value) ? when(Number(value)).slice(5) : "–")
+  : (!value || value === "Unknown" || value === "N/A" || value === "None") ? "–" : String(value).replace("T", " ").slice(5, 16);
+const two = (number) => String(number).padStart(2, "0");
+
+function duration(seconds) {
+  if (seconds == null) return "–";
+  seconds = Math.round(seconds);
+  const days = Math.floor(seconds / 86400), hours = Math.floor(seconds % 86400 / 3600), minutes = Math.floor(seconds % 3600 / 60);
+  return (days ? days + "-" : "") + (days || hours ? (days ? two(hours) : hours) + ":" + two(minutes) : minutes) + ":" + two(seconds % 60);
+}
+function bytes(count) {
+  if (count == null) return "–";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let index = 0;
+  while (count >= 1024 && index < units.length - 1) { count /= 1024; index += 1; }
+  return (index && count < 100 ? count.toFixed(1) : Math.round(count)) + " " + units[index];
+}
+const percent = (ratio) => ratio == null ? "–" : (ratio < 0.0095 && ratio > 0 ? "<1" : Math.round(100 * ratio)) + " %";
+const hours = (value) => value >= 100 ? Math.round(value).toLocaleString() : value.toFixed(value >= 10 ? 1 : 2);
+function when(epoch) {
+  if (!epoch) return "–";
+  const date = new Date(1000 * epoch);
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}`;
+}
+const daysSince = (epoch) => Math.floor((Date.now() / 1000 - epoch) / 86400);
+
+function meter(used, limit) {
+  const ratio = limit ? Math.min(1, used / limit) : 0;
+  return el("span", { class: "meter" + (ratio > 0.9 ? " full" : ratio > 0.75 ? " warn" : "") }, el("i", { style: `width:${100 * ratio}%` }));
+}
+
+/* ---------- queue and history ---------- */
+
+function renderQueue() {
+  const body = $("#queue");
+  const ids = new Set(state.queue.map((job) => job.id));
+  const shown = new Set(shownJobs().map((job) => job.id));
+  for (const id of [...state.picked]) if (!ids.has(id) || !shown.has(id)) state.picked.delete(id);
+  // The name of the page carries a mark while a job runs : visible on the tab from another one.
+  const running = state.queue.filter((job) => job.state === "RUNNING").length;
+  document.title = (running ? `▶ ${running} · ` : "") + "Cluster monitor";
+  $("#mark").hidden = !running;
+  $("#queue-count").textContent = state.queue.length
+    ? `${state.queue.filter((j) => j.state === "RUNNING").length} running, ${state.queue.filter((j) => j.state === "PENDING").length} pending` : "";
+  if (!state.queue.length) body.replaceChildren(el("tr", {}, el("td", { class: "empty", colspan: 13 }, "No job in the queue.")));
+  else body.replaceChildren(...folded(state.queue, (job) => {
+    const box = el("input", { type: "checkbox", "aria-label": "Select job " + job.id, checked: state.picked.has(job.id),
+      onclick: (event) => { event.stopPropagation(); event.target.checked ? state.picked.add(job.id) : state.picked.delete(job.id); syncPicks(); } });
+    const usual = (state.waits || {})[job.partition];
+    const start = job.state !== "PENDING" ? stamp(job.start) : stamp(job.start) !== "–" ? "expected " + stamp(job.start)
+      : usual ? el("span", { class: "muted", title: `Slurm gives no expected start ; median wait of ${usual.jobs} job${usual.jobs > 1 ? "s" : ""} of the period on ${job.partition}` }, `usually ${span(usual.median)}`) : "–";
+    return el("tr", { class: "pick" + (state.open === job.id ? " open" : "") + (job.member ? " member" : ""), onclick: () => openJob(job.id) },
+      el("td", {}, state.actions ? box : null), el("td", { class: "id" }, jobLink(job.id)), el("td", { class: "name", title: job.name }, job.name),
+      el("td", {}, job.partition), el("td", {}, badge(job.state)), el("td", { class: "num" }, job.elapsed),
+      el("td", { class: "num" }, job.state === "RUNNING" ? job.left : job.limit), el("td", {}, start),
+      el("td", { class: "num" }, job.cpus), el("td", { class: "num" }, job.mem),
+      el("td", {}, gres(job.gres)), el("td", {}, job.where),
+      el("td", { class: "act" }, state.actions ? el("button", { class: "small danger", onclick: (event) => { event.stopPropagation(); act("cancel", job); } }, "Kill") : null));
+  }));
+  syncPicks();
+}
+
+// The tasks of a job array (`123_4`, `123_[5-9]`) under one line : how many run, wait, ended, and a bar. Click to unfold.
+const arrayOf = (id) => id.includes("_") ? id.split("_")[0] : "";
+function tasks(id) {
+  const list = (id.match(/_\[([^\]%]*)/) || [])[1];
+  if (list == null) return 1;
+  return list.split(",").reduce((total, part) => {
+    const [range, step] = part.split(":"), [low, high] = range.split("-").map(Number);
+    return total + (Number.isFinite(high) ? Math.floor((high - low) / (Number(step) || 1)) + 1 : 1);
+  }, 0);
+}
+// The jobs that have a row : not the tasks of a folded array, which are never selected while they are hidden.
+function shownJobs() {
+  const sizes = new Map();
+  for (const job of state.queue) if (arrayOf(job.id)) sizes.set(arrayOf(job.id), (sizes.get(arrayOf(job.id)) || 0) + 1);
+  return state.queue.filter((job) => !(sizes.get(arrayOf(job.id)) > 1) || state.unfolded.has(arrayOf(job.id)));
+}
+function folded(queue, row) {
+  const groups = new Map();
+  for (const job of queue) if (arrayOf(job.id)) groups.set(arrayOf(job.id), [...(groups.get(arrayOf(job.id)) || []), job]);
+  const out = [], shown = new Set();
+  for (const job of queue) {
+    const base = arrayOf(job.id), members = groups.get(base) || [];
+    if (members.length < 2) { out.push(row(job)); continue; }
+    if (shown.has(base)) continue;
+    shown.add(base);
+    const past = state.history.filter((item) => arrayOf(item.id) === base);
+    const count = { run: members.filter((item) => item.state === "RUNNING").length,
+      wait: members.filter((item) => item.state !== "RUNNING").reduce((total, item) => total + tasks(item.id), 0),
+      done: past.filter((item) => item.state === "COMPLETED").length, bad: past.filter((item) => item.state !== "COMPLETED").length };
+    const total = count.run + count.wait + count.done + count.bad, open = state.unfolded.has(base);
+    const part = (kind, title) => count[kind] ? el("i", { class: "part " + kind, style: `width:${100 * count[kind] / total}%`, title }) : null;
+    out.push(el("tr", { class: "fold", onclick: () => { open ? state.unfolded.delete(base) : state.unfolded.add(base); renderQueue(); } },
+      el("td", {}), el("td", { class: "id" }, el("button", { class: "link plain", "aria-expanded": String(open), title: "Show or hide the tasks of this array" }, (open ? "▾ " : "▸ ") + base + "_*")),
+      el("td", { class: "name", title: members[0].name }, members[0].name),
+      el("td", { colspan: 10 }, `array of ${total} task${total > 1 ? "s" : ""}`,
+        el("span", { class: "meter" }, part("done", "completed"), part("bad", "ended otherwise"), part("run", "running"), part("wait", "pending")),
+        [[count.run, "running"], [count.wait, "pending"], [count.done, "completed"], [count.bad, "ended otherwise"]].filter(([value]) => value).map(([value, label]) => `${value} ${label}`).join(" · "),
+        state.finished > state.history.length ? " (ended tasks : among the listed jobs only)" : "")));
+    if (open) for (const member of members) out.push(row({ ...member, member: true }));
+  }
+  return out;
+}
+
+// A job opens from its identifier too, a button the keyboard reaches (a table row cannot take the focus).
+const jobLink = (id) => el("button", { class: "link plain", title: "Open the job panel", onclick: (event) => { event.stopPropagation(); openJob(id); } }, id);
+
+function syncPicks() {
+  const count = state.picked.size;
+  for (const id of ["kill-selected", "kill-pending", "kill-all", "pick-all"]) $("#" + id).hidden = !state.actions;
+  $("#kill-selected").disabled = !count;
+  $("#kill-selected").textContent = count ? `Kill selected (${count})` : "Kill selected";
+  $("#pick-all").checked = count > 0 && count === shownJobs().length;
+  $("#kill-pending").disabled = !state.queue.some((job) => job.state === "PENDING");
+  $("#kill-all").disabled = !state.queue.length;
+}
+
+function memoryCell(job) {
+  if (job.mem_peak == null || !job.mem_req) return el("td", { class: "num muted" }, "–");
+  const ratio = job.mem_peak / job.mem_req;
+  return el("td", { class: "num", title: `${bytes(job.mem_peak)} of ${bytes(job.mem_req)}` }, `${bytes(job.mem_peak)} / ${bytes(job.mem_req)} · ${percent(ratio)}`);
+}
+
+function renderHistory() {
+  const needle = $("#filter").value.trim().toLowerCase();
+  const rows = state.history.filter((job) => !needle || (job.name + " " + job.state + " " + job.id).toLowerCase().includes(needle));
+  const cut = state.finished > state.history.length ? ` (the ${state.history.length} most recent of ${state.finished})` : "";
+  $("#history-count").textContent = (state.history.length ? `${rows.length} of ${state.history.length}${cut} · ` : "")
+    + (state.read ? `accounting read at ${new Date(1000 * state.read).toLocaleTimeString()}` : "");
+  $("#history-count").title = "The accounting database is read every two minutes while the tab is visible, when a job leaves the queue, and on Refresh now";
+  const body = $("#history");
+  if (!rows.length) body.replaceChildren(el("tr", {}, el("td", { class: "empty", colspan: 15 }, "No finished job in this period.")));
+  else body.replaceChildren(...rows.map((job) => el("tr", { class: "pick" + (state.open === job.id ? " open" : ""), onclick: () => openJob(job.id) },
+    el("td", { class: "id" }, jobLink(job.id)), el("td", { class: "name", title: job.name }, job.name), el("td", {}, job.partition),
+    el("td", {}, badge(job.state), job.restarts ? badge(`restarted ×${job.restarts}`, "s-wait") : null), el("td", {}, job.exit),
+    el("td", { class: "num" }, duration(job.elapsed)), el("td", { class: "num" }, job.limit ? percent(job.elapsed / job.limit) : "–"),
+    memoryCell(job), el("td", { class: "num" }, percent(job.cpu_eff)), el("td", { class: "num" }, duration(job.wait)),
+    el("td", {}, stamp(job.end)), el("td", {}, job.nodes), el("td", { class: "num" }, job.cpus), el("td", { class: "num" }, job.gpus || "–"),
+    el("td", { class: "num", hidden: !site().usage }, occupancy(job)))));
+  $("#occupancy-head").hidden = !site().usage;
+}
+
+// The occupancy of the GPUs of a job, from the usage service ; its colour and its word follow the thresholds of the site.
+function occupancy(job) {
+  const rate = state.rated.get(job.id);
+  if (!rate || rate.occupancy == null) return job.gpus && state.rated.size ? el("span", { class: "muted", title: "Not measured, or not among the jobs the service returned" }, "–") : "";
+  const usage = site().usage || {};
+  const kind = rate.occupancy < usage.poor ? ["s-fail", "poor"] : rate.occupancy < usage.good ? ["s-wait", "fair"] : ["s-run", "good"];
+  return el("span", { class: "badge " + kind[0], title: `${usage.measure || "occupancy"} ${percent(rate.occupancy)}` + (rate.utilization != null ? ` · utilisation ${percent(rate.utilization)}` : "")
+ }, `${percent(rate.occupancy)} · ${kind[1]}`);
+}
+
+// Only the last reading asked is shown : one that was on its way when the token changed is dropped. Its caller still gets what it read.
+async function loadEfficiency() {
+  const turn = loadEfficiency.turn = (loadEfficiency.turn || 0) + 1;
+  if (!state.token) return null;
+  let rated = new Map(), efficiency;
+  try {
+    efficiency = await api("/api/efficiency", { days: $("#days").value });
+    rated = new Map(efficiency.jobs.map((job) => [job.id, job]));
+  } catch (error) { efficiency = { error: error.message }; }
+  if (turn !== loadEfficiency.turn) return efficiency;
+  state.rated = rated; state.efficiency = efficiency;
+  renderHistory(); renderSummary();
+  return efficiency;
+}
+
+// The token of the usage service, typed in the page : sent once to the local server, never kept by the page nor shown again.
+// The service, its measure and its thresholds are those of the site ; a cluster without one shows none of this.
+const rule = (usage) => `under ${percent(usage.poor)} is poor, above ${percent(usage.good)} is good`;
+function showUsage() {
+  const usage = site().usage;
+  $("#usage").hidden = !usage; $("#cluster-note").textContent = site().notes.cluster || "";
+  $("#usage").textContent = "GPU occupancy : " + (state.token ? "token set" : "set the token");
+  if (!usage) return;
+  const safe = /^https:\/\//.test(usage.page) ? usage.page : "";
+  $("#occupancy-head").title = `Mean ${usage.measure} of the GPUs of the job, from ${usage.service} : ${rule(usage)}. Needs a token of that service : `
+    + "the button « GPU occupancy » above this table" + (usage.variable ? `, or ${usage.variable} in the environment of the server` : "");
+  $("#usage-what").textContent = `The ${usage.measure} of the finished GPU jobs is not in Slurm : it is read from ${usage.service}, which asks for a personal token.`;
+  $("#usage-open").hidden = !safe; $("#usage-link").href = safe; $("#usage-link").textContent = safe;
+  $("#usage-sign").textContent = usage.sign ? `(${usage.sign})` : "";
+  $("#usage-field").textContent = usage.field; $("#usage-token").placeholder = usage.field;
+  $("#usage-where").replaceChildren("The token goes to the local server of this page only, which keeps it in memory until it stops : it is never written to disk, shown again, nor sent anywhere else than to ",
+    el("code", {}, usage.host), ".", ...(usage.variable ? [" To keep it over a restart, ", el("code", {}, `export ${usage.variable}=…`), " in the shell that starts the server."] : []));
+}
+function usageState(text, kind) {
+  if ($("#usage-box").open) { $("#usage-state").textContent = text; $("#usage-state").className = kind || "muted"; } else toast(text);
+}
+// While a token is being sent and checked, the dialog stays open and `refresh` leaves `state.token` alone : a status asked before the end of
+// the change may be outdated (`enrolled` counts the starts and the ends, so a refresh that began meanwhile is set aside too).
+async function setUsage(token) {
+  const buttons = [$("#usage-save"), $("#usage-forget"), $("#usage-close")];
+  for (const button of buttons) button.disabled = true;
+  state.enrolling = true; state.enrolled = (state.enrolled || 0) + 1;
+  $("#usage-token").value = "";
+  try {
+    const data = await api("/api/enrol", { token });
+    state.token = Boolean(data.enrolled); state.rated = new Map(); state.efficiency = null;
+    showUsage(); $("#usage-forget").hidden = !state.token;
+    if (!state.token) { loadEfficiency(); renderHistory(); renderSummary(); $("#usage-box").close(); toast("Token forgotten : GPU occupancy off"); return; }
+    usageState("Token saved ; asking the usage service…");
+    // The answer of this very reading decides, not `state.efficiency`, which a refresh may have taken over meanwhile.
+    const read = await loadEfficiency();
+    if (!read || read.error) usageState("Token saved, but " + (read ? read.error : "the usage service was not asked") + ". Paste another one, or forget it.", "s-fail-text");
+    else { $("#usage-box").close(); toast("Token accepted : GPU occupancy on"); }
+  } catch (error) {
+    if (error.status === 400) usageState("Not saved : " + error.message + ".", "s-fail-text"); else { $("#usage-box").close(); fail(error); }
+  } finally { state.enrolling = false; state.enrolled += 1; for (const button of buttons) button.disabled = false; }
+}
+$("#usage").onclick = () => {
+  $("#usage-token").value = ""; $("#usage-forget").hidden = !state.token;
+  $("#usage-box").showModal(); $("#usage-token").focus(); veil();
+  usageState(state.token ? "A token is in use. Saving another one replaces it." : "No token : the GPU occupancy is off.");
+};
+$("#usage-save").onclick = () => {
+  const token = $("#usage-token").value.trim();
+  if (token) setUsage(token); else usageState("Paste the token first.", "s-fail-text");
+};
+$("#usage-token").onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); $("#usage-save").click(); } };
+// The token is typed in a text field drawn as dots, not in a password field : the password manager of a browser takes a password field for
+// the login of this address and keeps what is typed in it ready to be saved (seen in Chromium, whatever its `autocomplete`). The text field
+// must hide the token as a password field does : the copy and cut commands and a drag take nothing out of it, and a browser gets a password
+// field instead when it cannot draw the dots, or when the selection of the dots is not shown to be dots : it gives the text behind them
+// (Firefox, where a selection is also what the middle click of Linux pastes), or it cannot be read : the selection of the one character
+// put in the field must be one character that is not it. Called with the field focused and empty, each time the dialog opens ; a
+// password field stays one. `autocomplete="off"` on the field is part of it : a browser keeps what is typed in a text field with the
+// state of the page, which it can write to disk, unless it is told not to — as it never does for a password field.
+function veil() {
+  const field = $("#usage-token");
+  if (field.type === "password") return;
+  let clear = !(window.CSS && CSS.supports("-webkit-text-security", "disc"));
+  if (!clear) {
+    getSelection().removeAllRanges();
+    field.value = "x"; field.select();
+    const seen = String(getSelection());
+    clear = seen.length !== 1 || seen === "x"; field.value = "";
+  }
+  if (clear) field.type = "password";
+}
+for (const name of ["copy", "cut", "dragstart"]) $("#usage-token").addEventListener(name, (event) => event.preventDefault());
+$("#usage-forget").onclick = () => setUsage("");
+$("#usage-close").onclick = () => $("#usage-box").close();
+$("#usage-box").addEventListener("cancel", (event) => { if (state.enrolling) event.preventDefault(); });
+// Chromium lets a second Escape close a dialog whose first one was set aside : while a token is being checked, a dialog that closed is opened again.
+$("#usage-box").addEventListener("close", () => { $("#usage-token").value = ""; if (state.enrolling) $("#usage-box").showModal(); });
+// Nothing is left in the field when the page is left or reloaded : a browser can bring the text of a field back, or offer to save a password field.
+window.addEventListener("pagehide", () => { $("#usage-token").value = ""; });
+
+function renderAdvice() {
+  const rows = state.advice || [], ask = (text) => text ? el("code", {}, text) : el("span", { class: "muted" }, "–");
+  $("#advice-count").textContent = rows.length ? `${rows.length} name${rows.length > 1 ? "s" : ""}, ${rows.filter((row) => row.mem || row.time || row.cores).length} with a smaller request that fits` : "";
+  $("#advice").replaceChildren(...(rows.length ? rows.map((row) => el("tr", {},
+    el("td", { class: "name", title: row.name }, row.name), el("td", { class: "num" }, row.jobs),
+    el("td", { class: "num" }, row.mem_peak && row.mem_req ? `${bytes(row.mem_peak)} / ${bytes(row.mem_req)} · ${percent(row.mem_peak / row.mem_req)}` : "–"), el("td", {}, ask(row.mem && `--mem=${row.mem}G`)),
+    el("td", { class: "num" }, row.limit ? `${duration(row.elapsed)} / ${duration(row.limit)} · ${percent(row.elapsed / row.limit)}` : duration(row.elapsed)),
+    el("td", {}, ask(row.time && `--time=${Math.floor(row.time / 60)}:${two(row.time % 60)}:00`)),
+    el("td", { class: "num" }, row.cpu_used != null ? `${amount(row.cpu_used)} / ${row.cpus}` : "–"), el("td", {}, ask(row.cores && `--cpus-per-task=${row.cores}`)),
+    el("td", { class: "wrap" }, row.oom ? badge(`${row.oom} out of memory : ask for more`, "s-fail") : null, row.timeout ? badge(`${row.timeout} timed out : ask for more time`, "s-fail") : null,
+      row.tasks > 1 ? el("span", { class: "muted", title: "The accounting records the memory peak of the largest task of a step, not of the job" }, `steps of ${row.tasks} tasks : no advice on memory nor CPUs `) : null,
+      row.completed < row.jobs && !row.oom && !row.timeout ? el("span", { class: "muted" }, `${row.completed} of ${row.jobs} completed`) : null)))
+    : [el("tr", {}, el("td", { class: "empty", colspan: 9 }, "No completed job in this period."))]));
+}
+
+function renderSummary() {
+  const sum = state.summary;
+  if (!sum) return;
+  const bad = Object.entries(sum.states).filter(([name]) => ["FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "BOOT_FAIL", "DEADLINE"].includes(name));
+  const tile = (value, label, title) => el("div", { class: "tile", title }, el("b", {}, value), el("span", {}, label));
+  $("#summary").replaceChildren(...[
+    tile(sum.jobs, `jobs in ${sum.days} day${sum.days > 1 ? "s" : ""}`, "Finished and running jobs of the period, the ones cancelled before they started included"),
+    tile(hours(sum.gpu_hours), "GPU-hours", "Allocated GPUs × time run inside the period, running jobs included ; of a requeued job, the last run only." + (site().notes.gpu_hours ? " " + site().notes.gpu_hours : "")),
+    tile(hours(sum.cpu_hours), "CPU-hours", "Allocated CPUs × time run inside the period, running jobs included ; of a requeued job, the last run only"),
+    tile(bad.reduce((total, [, count]) => total + count, 0), "failed, timed out, out of memory", bad.map(([name, count]) => `${count} ${name.toLowerCase()}`).join(", ") || "none"),
+    tile(duration(sum.wait_median), "median wait", "Median time between submission and start"),
+    tile(sum.restarts, "restarts", "Requeues after a preemption or a node failure : a job without checkpoints starts over"),
+    !state.token || !site().usage ? null : state.efficiency && state.efficiency.error ? tile("–", "GPU occupancy : " + state.efficiency.error, state.efficiency.error)
+      : tile(state.efficiency && state.efficiency.mean != null ? percent(state.efficiency.mean) : "–", `mean GPU ${site().usage.measure}`,
+        `From ${site().usage.service}, over the GPU jobs it measured, weighted by their time : ${rule(site().usage)}.`
+        + (state.efficiency ? ` ${state.efficiency.measured} of ${state.efficiency.jobs.length} jobs measured` + (state.efficiency.cut ? " (the jobs that used the most only)" : "")
+          + `, over the UTC days from ${state.efficiency.start} to ${state.efficiency.end} (excluded) : whole days, so somewhat more than the period of the list.` : ""))].filter(Boolean));
+}
+
+// Alerts : what changed in the queue between two refreshes, as one message of the browser (and in the page).
+function watch(before, data) {
+  // The finished jobs already seen, to announce those that started and ended between two refreshes ; reset with the period.
+  const past = state.ended && state.ended.days === data.summary.days ? state.ended.ids : null;
+  state.ended = { days: data.summary.days, ids: new Set(data.history.map((job) => job.id)) };
+  if (!state.alerts || !before) return;
+  const events = [], word = (text) => text.toLowerCase().replaceAll("_", " ");
+  const ending = (job) => word(job.state) + (job.state === "COMPLETED" ? "" : `, exit ${job.exit}`);
+  for (const job of data.queue) {
+    const old = before.get(job.id);
+    if (job.state === "RUNNING" && (!old || old.state !== "RUNNING")) events.push(`${job.name} (${job.id}) started on ${job.where}`);
+    else if (old && old.state === "RUNNING" && job.state === "PENDING") events.push(`${job.name} (${job.id}) was requeued`);
+  }
+  for (const [id, old] of before) {
+    if (state.known.has(id) || id.includes("[")) continue;
+    const done = data.history.find((job) => job.id === id);
+    events.push(`${old.name} (${id}) ` + (done ? ending(done) : "left the queue"));
+  }
+  if (past) for (const job of data.history) if (!past.has(job.id) && !before.has(job.id)) events.push(`${job.name} (${job.id}) ${ending(job)}`);
+  if (!events.length) return;
+  const text = events.slice(0, 4).join("\n") + (events.length > 4 ? `\n… and ${events.length - 4} more` : "");
+  toast(text);
+  try { if (Notification.permission === "granted") new Notification("Cluster monitor", { body: text }); } catch (error) { /* the page still shows it */ }
+}
+function showAlerts() { $("#notify").textContent = "Alerts : " + (state.alerts ? "on" : "off"); }
+$("#notify").onclick = () => {
+  state.alerts = !state.alerts;
+  try { localStorage.setItem("alerts", state.alerts ? "1" : ""); } catch (error) { /* kept for this tab only */ }
+  showAlerts();
+  if (!state.alerts) return;
+  const told = () => { if (Notification.permission !== "granted") toast("The browser does not allow its messages here : the alerts are shown in this page only."); };
+  if (!("Notification" in window)) toast("This browser has no messages : the alerts are shown in this page only.");
+  else if (Notification.permission === "default") Promise.resolve(Notification.requestPermission()).then(told, told);
+  else told();
+};
+try { state.alerts = localStorage.getItem("alerts") === "1"; } catch (error) { state.alerts = false; }
+showAlerts();
+
+// A refresh that is not asked by hand : done after the one that is running, never dropped.
+function soon() { if (state.busy) state.later = true; else refresh(); }
+
+async function refresh(manual) {
+  if (state.busy) { state.again = state.again || Boolean(manual); return; }
+  state.busy = true; state.last = Date.now();
+  try {
+    const enrolled = state.enrolled, paced = state.paced;
+    const status = await api("/api/status");
+    state.host = status.host; state.writable = status.writable; state.actions = status.actions !== false; state.site = { ...SITE, ...(status.site || state.site) };
+    state.sharing = status.connected ? "" : String(status.sharing || "");
+    if (!state.pacing && paced === state.paced) { state.sample = status.sample || 0; showPace(); }
+    if (!state.enrolling && enrolled === state.enrolled) state.token = Boolean(status.enrolled);
+    $("#version").textContent = status.version ? "v" + status.version : ""; syncFiles(); renderLinks(); showUsage();
+    if (!status.connected) throw Object.assign(new Error("not connected"), { status: 503 });
+    const data = await api("/api/jobs", { days: $("#days").value, fresh: Boolean(manual), quiet: document.hidden });
+    state.queue = data.queue; state.history = data.history; state.finished = data.finished || data.history.length;
+    // A queue that could not be read is not an empty queue : nothing is compared with it.
+    const before = state.known, listed = data.listed !== false;
+    if (listed) state.known = new Map(data.queue.map((job) => [job.id, job]));
+    if (state.read !== data.read || state.period !== $("#days").value) { state.period = $("#days").value; loadEfficiency(); }
+    state.summary = data.summary; state.read = data.read; state.advice = data.advice; state.waits = data.waits;
+    if (listed) watch(before, data);
+    $("#conn").className = "pill s-run"; $("#conn").textContent = "connected";
+    banner(data.error ? "Slurm reported : " + data.error : null);
+    $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
+    renderQueue(); renderHistory(); renderSummary(); renderAdvice();
+    if (state.open) { showHead(); if ((state.tab === "output" || state.tab === "metric") && findJob(state.open)?.state === "RUNNING") loadTab(true); }
+    if (state.loaded.cluster) { renderPartitions(); renderAccount(); }
+    if (state.view === "resources" && !document.hidden) loadResources();
+    if (manual && state.view !== "jobs") loadView(true);
+  } catch (error) { fail(error); } finally {
+    state.busy = false;
+    // A refresh asked meanwhile is done now : `again` by hand (a new reading of the accounting), `later` by a change of period.
+    if (state.again || state.later) { const manual = Boolean(state.again); state.again = state.later = false; refresh(manual); }
+  }
+}
+
+/* ---------- actions ---------- */
+
+const LABELS = { cancel: "Kill", term: "Send SIGTERM to", requeue: "Requeue", hold: "Hold", release: "Release" };
+
+async function send(action, id) {
+  try {
+    const result = await api("/api/action", { action, id });
+    toast(result.ok ? `Done : ${result.command}` : `Failed : ${result.output || result.command}`);
+    return result.ok;
+  } catch (error) { fail(error); return false; }
+}
+
+async function act(action, job) {
+  if (!confirm(`${LABELS[action]} job ${job.id} (${job.name}) ?`)) return;
+  await send(action, job.id);
+  setTimeout(soon, 800);
+}
+
+$("#kill-selected").onclick = async () => {
+  const ids = [...state.picked];
+  if (!ids.length || !confirm(`Kill ${ids.length} selected job(s) ?\n${ids.join(", ")}`)) return;
+  for (const id of ids) await send("cancel", id);
+  state.picked.clear(); setTimeout(soon, 800);
+};
+$("#kill-pending").onclick = async () => {
+  if (!confirm("Kill every pending job of this account ?")) return;
+  await send("cancel_pending"); setTimeout(soon, 800);
+};
+$("#kill-all").onclick = async () => {
+  if (!confirm(`Kill ALL ${state.queue.length} job(s) of this account, running ones included ?`)) return;
+  await send("cancel_all"); setTimeout(soon, 800);
+};
+$("#pick-all").onclick = (event) => {
+  state.picked = new Set(event.target.checked ? shownJobs().map((job) => job.id) : []); renderQueue();
+};
+
+/* ---------- side panels ---------- */
+
+function side(panel) {
+  for (const name of ["detail", "preview"]) $("#" + name).hidden = name !== panel;
+  document.body.classList.toggle("split", Boolean(panel));
+}
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || $("#usage-box").open) return;
+  if (state.open) $("#d-close").click(); else if (state.file) $("#p-close").click();
+});
+
+/* ---------- job panel ---------- */
+
+const findJob = (id) => state.queue.find((job) => job.id === id) || state.history.find((job) => job.id === id);
+
+function showHead() {
+  const job = findJob(state.open) || { id: state.open, name: "", state: "UNKNOWN" };
+  $("#d-title").textContent = `${job.id}  ${job.name}`;
+  $("#d-state").replaceChildren(badge(job.state));
+  const queued = state.queue.some((item) => item.id === job.id);
+  const buttons = [];
+  if (!state.actions) buttons.push(el("span", { class: "muted" }, "Job actions are disabled (--no-actions)."));
+  else if (queued) {
+    buttons.push(el("button", { class: "danger", onclick: () => act("cancel", job) }, "Kill"));
+    if (job.state === "RUNNING") buttons.push(el("button", { title: "scancel --signal=TERM : lets the job save its state and be requeued", onclick: () => act("term", job) }, "Send SIGTERM"));
+    if (job.state === "PENDING") buttons.push(el("button", { onclick: () => act("hold", job) }, "Hold"), el("button", { onclick: () => act("release", job) }, "Release"));
+  }
+  if (state.actions) buttons.push(el("button", { title: "scontrol requeue : running, pending or recently finished batch jobs only", onclick: () => act("requeue", job) }, "Requeue"));
+  $("#d-actions").replaceChildren(...buttons);
+}
+
+function openJob(id) {
+  state.open = id; state.file = null; side("detail");
+  showHead(); renderQueue(); renderHistory(); loadTab();
+}
+$("#d-close").onclick = () => { state.open = null; side(null); renderQueue(); renderHistory(); };
+
+for (const button of $("#d-tabs").children) button.onclick = () => {
+  state.tab = button.dataset.tab;
+  for (const other of $("#d-tabs").children) other.classList.toggle("on", other === button);
+  loadTab();
+};
+$("#d-stream").onchange = () => loadTab(); $("#d-lines").onchange = () => loadTab();
+
+function grid(table, empty) {
+  if (!table.rows.length) return el("p", { class: "muted" }, empty);
+  return el("div", { class: "scroll" }, el("table", {},
+    el("thead", {}, el("tr", {}, table.columns.map((name) => el("th", {}, name)))),
+    el("tbody", {}, table.rows.map((row) => el("tr", {}, row.map((cell) => el("td", {}, cell)))))));
+}
+const pairs = (rows) => el("dl", { class: "kv" }, rows.map(([name, value]) => [el("dt", {}, name), el("dd", {}, value)]));
+
+function usageRows(use) {
+  if (!use) return el("p", { class: "muted" }, "No accounting record yet.");
+  const line = (used, limit, text) => [meter(used, limit), " ", text];
+  return pairs([
+    ["Time", use.limit ? line(use.elapsed, use.limit, `${duration(use.elapsed)} of ${duration(use.limit)} · ${percent(use.elapsed / use.limit)}`) : duration(use.elapsed)],
+    ["Memory peak", use.mem_peak != null && use.mem_req ? line(use.mem_peak, use.mem_req, `${bytes(use.mem_peak)} of ${bytes(use.mem_req)} asked · ${percent(use.mem_peak / use.mem_req)}`) : "not recorded (no finished step yet)"],
+    ["CPU", use.cpu_eff != null ? line(use.cpu_eff, 1, `${percent(use.cpu_eff)} of ${use.cpus} allocated CPU${use.cpus > 1 ? "s" : ""}`) : "not recorded yet"],
+    ["GPUs", use.gpus ? `${use.gpus} allocated : their load is in the GPU tab while the job runs` : "none"],
+  ]);
+}
+
+async function loadTab(quiet) {
+  const id = state.open, tab = state.tab, body = $("#d-body");
+  $("#d-outbar").hidden = tab !== "output" && tab !== "metric"; $("#d-metricbar").hidden = tab !== "metric";
+  $("#d-lines").hidden = tab === "metric";
+  if (!quiet) body.replaceChildren(el("p", { class: "muted" }, "Loading"));
+  try {
+    let content;
+    const job = findJob(id);
+    if (tab === "output") {
+      const out = await api("/api/output", { id, stream: $("#d-stream").value, lines: $("#d-lines").value });
+      $("#d-path").textContent = out.path;
+      content = out.missing ? [el("p", { class: "muted" }, out.missing)] : [el("pre", {}, out.text || "(empty file)")];
+    } else if (tab === "info") {
+      const info = await api("/api/job", { id });
+      content = [el("h2", { style: "margin-bottom:8px" }, "Accounting record"),
+        info.record.length ? pairs(info.record) : el("p", { class: "muted" }, "No accounting record yet."),
+        el("h2", { style: "margin-bottom:8px" }, "Scheduler record"),
+        info.scontrol ? el("pre", {}, info.scontrol)
+          : el("p", { class: "muted" }, "The scheduler forgets a job a few minutes after its end ; the accounting record above stays."),
+        el("p", { class: "note", style: "padding:14px 0 0" }, "The dates of these two records are in the time zone of the cluster ; the lists show them in the one of this computer.")];
+    } else if (tab === "usage") {
+      const info = await api("/api/job", { id });
+      content = [el("h2", { style: "margin-bottom:8px" }, "Used against asked"), usageRows(info.usage),
+        el("h2", { style: "margin-bottom:8px" }, "Steps"), grid(info.accounting, "No accounting record."),
+        el("h2", { style: "margin:14px 0 8px" }, "Live (running steps)"), grid(info.live, "No running step.")];
+    } else if (tab === "metric") {
+      const out = await api("/api/output", { id, stream: $("#d-stream").value, lines: 2000 });
+      $("#d-path").textContent = out.path;
+      content = out.missing ? [el("p", { class: "muted" }, out.missing)] : await metric(out.text);
+    } else if (job?.state !== "RUNNING") {
+      content = [el("p", { class: "muted" }, "GPU status is available for running jobs only.")];
+    } else {
+      const gpu = await api("/api/gpu", { id });
+      const node = /^[\w-]+$/.test(job.where) ? job.where : "<node>";
+      content = gpu.error ? [el("pre", {}, gpu.error)]
+        : [grid(gpu.gpus, "No GPU in this job."), el("h2", { style: "margin:14px 0 8px" }, "Processes"), grid(gpu.apps, "No process on the GPU."),
+          el("p", { class: "note", style: "padding:14px 0 0" }, "utilization.gpu is the figure of nvidia-smi : the share of the time during which something ran on the GPU. ",
+            "It can read 100 % on a job that wastes its GPU."),
+          // What the site adds : a text, a command, a text.
+          ...site().hints.map(([before, command, after = ""]) => el("p", { class: "note", style: "padding:8px 0 0" }, sited(before, { node, host: state.host }), " ",
+            el("code", {}, sited(command, { node, host: state.host })), /^[.,;]/.test(after) ? "" : " ", sited(after, { node, host: state.host })))];
+    }
+    if (state.open !== id || state.tab !== tab) return;
+    const atEnd = body.scrollTop + body.clientHeight >= body.scrollHeight - 30;
+    body.replaceChildren(...content.filter((node) => node != null));
+    if (tab === "output" && (!quiet || atEnd)) body.scrollTop = body.scrollHeight;
+  } catch (error) { if (!quiet) body.replaceChildren(el("p", { class: "muted" }, "Could not load : " + error.message)); fail(error); }
+}
+
+/* ---------- metric of a job : a number read in its output, drawn ---------- */
+
+const PATTERN = "loss\\D{0,3}([-+]?\\d*\\.?\\d+(?:[eE][-+]?\\d+)?)";
+try { $("#d-pattern").value = localStorage.getItem("pattern") || PATTERN; } catch (error) { $("#d-pattern").value = PATTERN; }
+$("#d-pattern").onchange = () => {
+  try { localStorage.setItem("pattern", $("#d-pattern").value); } catch (error) { /* kept for this tab only */ }
+  loadTab();
+};
+
+// The pattern is applied here, in the page : it never reaches the server nor the cluster. It runs apart from the page
+// (a worker), which stops it after 1.5 s : a slow pattern on a long output must not freeze the tab. A value is a plain
+// decimal number ; an empty group, or one that is not a number, is not a value.
+const MATCHER = `onmessage = (event) => {
+  const values = [], number = /^[-+]?(\\d+\\.?\\d*|\\.\\d+)(e[-+]?\\d+)?$/i;
+  for (const match of event.data.text.matchAll(new RegExp(event.data.source, "gi"))) {
+    const found = match[1] ?? match[0];
+    if (number.test(found)) values.push(Number(found));
+    if (values.length >= 5000) break;
+  }
+  postMessage(values);
+};`;
+function matches(text, source) {
+  return new Promise((resolve) => {
+    const address = URL.createObjectURL(new Blob([MATCHER], { type: "text/javascript" }));
+    let worker;
+    const end = (values) => { clearTimeout(timer); if (worker) worker.terminate(); URL.revokeObjectURL(address); resolve(values); };
+    const timer = setTimeout(() => end(null), 1500);
+    try { worker = new Worker(address); worker.onmessage = (event) => end(event.data); worker.onerror = () => end(null); worker.postMessage({ text, source }); }
+    catch (error) { end(null); }
+  });
+}
+
+async function metric(text) {
+  const source = $("#d-pattern").value || PATTERN;
+  try { new RegExp(source, "gi"); }
+  catch (error) { return [el("p", { class: "muted" }, "This pattern is not a valid regular expression : " + error.message)]; }
+  const slow = source + "\n" + state.open;
+  if (state.slow === slow) return [el("p", { class: "muted" }, "This pattern was stopped after 1.5 s on this output : it is not run again. Write a simpler one.")];
+  const values = await matches(text, source);
+  if (!values) { state.slow = slow; return [el("p", { class: "muted" }, "This pattern did not finish in 1.5 s on this output and was stopped. Write a simpler one.")]; }
+  if (values.length < 2) return [el("p", { class: "muted" }, `${values.length} value found in the last 2000 lines of this file with this pattern. `
+    + "Write a regular expression whose first group is the number, for instance  step (\\d+)  or  acc[=: ]+([0-9.]+) .")];
+  const low = Math.min(...values), high = Math.max(...values), W = Math.max(320, $("#d-body").clientWidth - 30), H = 240, L = 70, R = 12, T = 10, B = 24;
+  const spread = high - low || Math.abs(high) || 1, x = (index) => L + (W - L - R) * index / (values.length - 1), y = (value) => T + (H - T - B) * (1 - (value - low) / spread);
+  const short = (value) => Math.abs(value) >= 1e5 || (value && Math.abs(value) < 1e-3) ? value.toExponential(2) : String(Number(value.toPrecision(4)));
+  const frame = svg("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${values.length} values, from ${short(values[0])} to ${short(values.at(-1))}` });
+  for (let index = 0; index <= 4; index += 1) {
+    const value = low + spread * index / 4;
+    frame.append(svg("line", { class: "rule", x1: L, x2: W - R, y1: y(value), y2: y(value) }), svg("text", { x: L - 8, y: y(value) + 4, "text-anchor": "end" }, short(value)));
+  }
+  frame.append(svg("text", { x: L, y: H - 7 }, "first match"), svg("text", { x: W - R, y: H - 7, "text-anchor": "end" }, "last match"),
+    svg("path", { class: "curve", stroke: "var(--s1)", d: values.map((value, index) => `${index ? "L" : "M"}${x(index).toFixed(1)} ${y(value).toFixed(1)}`).join("") }));
+  return [el("div", { class: "plot" }, frame), pairs([["Values", values.length + (values.length >= 5000 ? " (the first 5000)" : "")], ["Last", short(values.at(-1))],
+    ["Lowest", short(low)], ["Highest", short(high)]]),
+    el("p", { class: "note", style: "padding:0" }, "Read in the last 2000 lines of the output (within 400 000 bytes), one point per match, in the order of the file.")];
+}
+
+/* ---------- storage ---------- */
+
+// What an area is for, as the site says it : the personal ones, then the families of shared directories it knows (a pattern of their path).
+function policy(area) {
+  if (area.personal) return site().uses[area.name] || "";
+  for (const [pattern, text] of site().shared) { try { if (new RegExp(pattern).test(area.path)) return text; } catch (error) { /* a pattern the browser cannot read is skipped */ } }
+  return "Extra directory given at start-up (--root). Read-only from here.";
+}
+// The days after which an area deletes an unused file ; 0 when it does not.
+const purge = (place) => Number(site().purge[place]) || 0;
+
+async function loadStorage() {
+  try {
+    const data = await api("/api/storage");
+    $("#quota").textContent = data.raw || "–"; $("#quota-box").hidden = !data.raw;
+    $("#areas").replaceChildren(...data.areas.map((area) => el("div", { class: "card" },
+      el("div", {}, el("strong", {}, area.personal ? area.name : baseName(area.path)), " ", el("span", { class: "path muted" }, area.path)),
+      area.limit ? [meter(area.used, area.limit), el("span", { title: area.whole ? "No quota is known for this cluster : this is the whole file system that holds the area, with the files of everyone" : "" },
+        `${bytes(area.used)} of ${bytes(area.limit)} · ${percent(area.used / area.limit)}` + (area.whole ? " · whole file system" : ""))] : el("span", { class: "muted" }, "No quota reported."),
+      area.files != null ? [meter(area.files, area.files_limit), el("span", {}, `${area.files.toLocaleString()} files` + (area.files_limit ? ` of ${area.files_limit.toLocaleString()}` : ""))] : null,
+      el("span", { class: "muted", style: "font-size:12px" }, policy(area)),
+      el("div", {}, el("button", { class: "small", onclick: () => openDir(area.path) }, "Browse")))));
+    state.loaded.storage = true;
+    if (!state.dir && data.areas.length) openDir(data.areas[0].path);
+  } catch (error) { fail(error); }
+}
+
+function crumbs(listing) {
+  const rest = listing.path.slice(listing.root.length).split("/").filter(Boolean);
+  const nodes = [el("button", { class: "link", onclick: () => openDir(listing.root) }, listing.area.startsWith("/") ? listing.area : "$" + listing.area)];
+  let path = listing.root;
+  for (const part of rest) {
+    path += "/" + part;
+    const target = path;
+    nodes.push("/", el("button", { class: "link", onclick: () => openDir(target) }, part));
+  }
+  $("#crumbs").replaceChildren(...nodes);
+}
+
+function note(text) { $("#files-note").textContent = text || ""; $("#files-note").hidden = !text; }
+
+// The rows of the file table : `items` maps the full path of each listed entry to its name and kind.
+function showItems(rows, empty) {
+  state.items = new Map(rows.map((row) => [row.path, row]));
+  state.chosen = new Set([...state.chosen].filter((path) => state.items.has(path)));
+  $("#files").replaceChildren(...(rows.length ? rows.map((row) => {
+    const stop = (handler) => (event) => { event.stopPropagation(); handler(event); };
+    const box = el("input", { type: "checkbox", "aria-label": "Select " + row.name, checked: state.chosen.has(row.path),
+      onclick: stop((event) => { event.target.checked ? state.chosen.add(row.path) : state.chosen.delete(row.path); syncFiles(); }) });
+    const tools = el("td", { class: "act" }, row.locked ? null : [
+      row.dir ? null : el("button", { class: "small", title: "Copy this file to this computer", onclick: stop(() => download(row.path)) }, "Download"),
+      canChange() ? [el("button", { class: "small", onclick: stop(() => renameEntry(row.path)) }, "Rename"),
+        el("button", { class: "small danger", onclick: stop(() => removeEntries([row.path])) }, "Delete")] : null]);
+    return el("tr", { class: row.open ? "pick" : "", onclick: row.open }, el("td", {}, canChange() && !row.locked ? box : null), row.cells, tools);
+  }) : [el("tr", {}, el("td", { class: "empty", colspan: 7 }, empty))]));
+  syncFiles();
+}
+
+// Files are changed only with --writable, and only where the directory really is in a personal area
+// (not in a directory added with --root, nor behind a link that leads to one).
+const canChange = () => Boolean(state.writable && state.dir && state.dir.changes);
+
+// The name of an entry is a button, which the keyboard reaches ; the click on the row does the same.
+const nameCell = (label, open) => open ? el("button", { class: "link plain", onclick: (event) => { event.stopPropagation(); open(); } }, label) : label;
+const selectable = () => [...state.items.values()].filter((row) => !row.locked).map((row) => row.path);
+
+function syncFiles() {
+  const count = state.chosen.size, moving = state.clip.length;
+  $("#files-tools").hidden = !canChange(); $("#files-mode").hidden = canChange() || !state.dir;
+  $("#files-mode").textContent = state.writable ? "read-only : outside the personal areas (a directory added with --root, or a link that leads to one), nothing is changed from here"
+    : "read-only : start the server with --writable to manage files";
+  $("#delete-selected").disabled = !count; $("#move-selected").disabled = !count;
+  $("#delete-selected").textContent = count ? `Delete selected (${count})` : "Delete selected";
+  $("#move-selected").textContent = count ? `Move selected (${count})…` : "Move selected…";
+  $("#files-all").checked = count > 0 && count === selectable().length; $("#files-all").hidden = !canChange();
+  $("#clip").hidden = !moving; $("#p-delete").hidden = !canChange();
+  $("#clip-text").textContent = moving ? `${moving} entr${moving > 1 ? "ies" : "y"} to move : open the destination directory, then ` : "";
+}
+
+// Only the answer to the latest request is shown : a slower, older one must not replace it.
+async function openDir(path) {
+  const ticket = state.ticket = (state.ticket || 0) + 1;
+  try {
+    const listing = await api("/api/files", { path });
+    if (ticket !== state.ticket) return;
+    state.dir = listing; state.search = null; crumbs(listing);
+    note(listing.error || (listing.truncated ? `Only the first ${listing.entries.length} entries are shown.` : ""));
+    // The policy is the one of the area that really holds the directory, not the one it was reached from through a link.
+    const limit = purge(listing.place);
+    showItems(listing.entries.map((entry) => {
+      const target = listing.path + "/" + entry.name;
+      const idle = daysSince(Math.max(entry.modified, entry.accessed));
+      const label = (entry.dir ? "▸ " : "") + entry.name + (entry.dir ? "/" : "") + (entry.link ? "  →  " + entry.link : "");
+      const open = entry.broken || entry.odd ? null : () => (entry.dir ? openDir(target) : openFile(target));
+      return { path: target, name: entry.name, dir: entry.dir && !entry.link, locked: entry.odd, open, cells: [
+        el("td", { class: "id name", title: entry.odd ? "This name holds a control character or is not valid UTF-8 : it cannot be sent back to the cluster. Use a terminal." : entry.name,
+          style: "max-width:520px" }, nameCell(label, open), entry.broken ? badge("broken link", "s-fail") : null, entry.odd ? badge("unusual name : terminal only", "s-off") : null),
+        el("td", { class: "num" }, entry.dir || entry.link ? "" : bytes(entry.size)), el("td", {}, when(entry.modified)), el("td", {}, when(entry.accessed)),
+        el("td", { class: "num" }, entry.dir ? "" : [idle + " d", limit && idle >= limit - 30 ? badge(idle >= limit ? "due for deletion" : `deleted in ${limit - idle} d`, idle >= limit - 10 ? "s-fail" : "s-wait") : null])] };
+    }), "Empty directory.");
+  } catch (error) {
+    if (ticket === state.ticket) note(`Could not list ${path} : ${error.message}`);
+    if (error.status !== 400) fail(error);
+  }
+}
+
+$("#measure").onclick = async () => {
+  if (!state.dir) return;
+  note("Measuring " + state.dir.path + " …");
+  try {
+    const size = await api("/api/measure", { path: state.dir.path });
+    note(`${size.path} : ${size.partial ? "more than " : ""}${size.files.toLocaleString()} files, ${size.partial ? "more than " : ""}${bytes(size.bytes)}`
+      + (size.partial ? ` (stopped after ${size.seconds} s to spare the login node ; measure a sub-directory for an exact figure).` : "."));
+  } catch (error) { note(""); fail(error); }
+};
+
+async function findUnused(days) {
+  if (!state.dir) return;
+  const ticket = state.ticket = (state.ticket || 0) + 1;
+  note("Searching " + state.dir.path + " …");
+  try {
+    const found = await api("/api/unused", { path: state.dir.path, days });
+    if (ticket !== state.ticket) return;
+    state.search = days;
+    note(`${found.entries.length}${found.truncated ? "+" : ""} file(s) under ${found.path} neither read nor modified for ${found.days} days`
+      + (found.partial ? ` (search stopped after ${found.seconds} s : the list is incomplete).` : ".")
+      + (purge(state.dir.place) ? " " + (site().remind[state.dir.place] || `This area ($${state.dir.place}) deletes a file after ${purge(state.dir.place)} unused days : copy what matters to an area that keeps it.`) : ""));
+    showItems(found.entries.map((entry) => {
+      const target = found.path + "/" + entry.name;
+      return { path: target, name: entry.name, dir: false, open: () => openFile(target), cells: [
+        el("td", { class: "id wrap" }, nameCell(entry.name, () => openFile(target))), el("td", { class: "num" }, bytes(entry.size)), el("td", {}, ""), el("td", {}, when(entry.used)),
+        el("td", { class: "num" }, daysSince(entry.used) + " d")] };
+    }), "Nothing unused for that long here.");
+  } catch (error) { note(""); fail(error); }
+}
+$("#unused").onclick = () => findUnused($("#unused-days").value);
+
+async function openFile(path) {
+  state.file = path; state.open = null; side("preview");
+  $("#p-title").textContent = path.split("/").pop(); $("#p-path").textContent = path; $("#p-size").textContent = "";
+  const body = $("#p-body");
+  body.replaceChildren(el("p", { class: "muted" }, "Loading"));
+  try {
+    const file = await api("/api/preview", { path, end: $("#p-end").value });
+    if (state.file !== path) return;
+    $("#p-size").textContent = bytes(file.size) + (file.cut ? ` · ${file.end === "head" ? "first" : "last"} 256 KiB shown` : "");
+    body.replaceChildren(file.binary ? el("p", { class: "muted" }, "Binary file : not shown.") : el("pre", {}, file.text || "(empty file)"));
+    if (file.end === "tail") body.scrollTop = body.scrollHeight;
+  } catch (error) { body.replaceChildren(el("p", { class: "muted" }, "Could not load : " + error.message)); if (error.status !== 400) fail(error); }
+}
+$("#p-end").onchange = () => { if (state.file) openFile(state.file); };
+$("#p-download").onclick = () => { if (state.file) download(state.file); };
+$("#p-delete").onclick = () => { if (state.file) removeEntries([state.file]); };
+
+/* ---------- file management ---------- */
+
+const baseName = (path) => path.split("/").pop();
+
+// Outcome of a change : one line per entry from the server ; failures are kept on screen.
+function report(result, done) {
+  const failed = result.results.filter((item) => item.status !== "done");
+  const count = result.results.length - failed.length;
+  note([failed.length ? "Not done — " + failed.map((item) => `${baseName(item.path)} : ${item.message || item.status}`).join(" · ") : "", result.error].filter(Boolean).join(" — "));
+  toast(failed.length || result.error ? `${count} ${done}, ${failed.length || "all"} failed` : `${count} ${done}`);
+}
+
+async function change(path, args, done, touched) {
+  try {
+    report(await api(path, args), done);
+  } catch (error) { note(""); if (error.status === 400 || error.status === 405) toast("Refused : " + error.message); else fail(error); }
+  if (state.file && touched.includes(state.file)) $("#p-close").click();
+  const shown = $("#files-note").textContent;
+  if (state.dir) { await (state.search ? findUnused(state.search) : openDir(state.dir.path)); if (shown) note(shown); }
+}
+
+async function removeEntries(paths) {
+  const known = (path) => state.items.get(path) || { name: baseName(path), dir: false };
+  const names = paths.map((path) => known(path).name + (known(path).dir ? "/" : ""));
+  const folders = paths.filter((path) => known(path).dir);
+  let text = paths.length === 1 ? `Delete ${folders.length ? "the directory" : "the file"} ${names[0]} ?`
+    : `Delete these ${paths.length} entries ?\n` + names.slice(0, 12).map((name) => "   " + name).join("\n") + (names.length > 12 ? `\n   … and ${names.length - 12} more` : "");
+  if (folders.length === 1 && paths.length === 1) {
+    try {
+      const size = await api("/api/measure", { path: paths[0] });
+      text += `\nIt contains ${size.partial ? "more than " : ""}${size.files.toLocaleString()} file(s), ${size.partial ? "more than " : ""}${bytes(size.bytes)} : all of it is deleted.`;
+    } catch (error) { text += "\nEverything it contains is deleted."; }
+  } else if (folders.length) text += `\n${folders.length} of them ${folders.length > 1 ? "are directories" : "is a directory"} : everything inside is deleted too.`;
+  // The area that really holds the files, not the one they were reached from : a link of the home directory may lead where nothing is backed up.
+  const place = state.dir ? state.dir.place : "";
+  text += "\n\n" + (site().backup[place] || `These files are in ${place ? "$" + place : "an area"}, for which no backup is known : a deletion cannot be undone.`);
+  if (folders.length) {
+    if ((prompt(text + "\n\nType delete to confirm.") || "").trim().toLowerCase() !== "delete") return;
+  } else if (!confirm(text)) return;
+  note("Deleting …");
+  await change("/api/remove", { paths }, "deleted", paths);
+}
+
+async function renameEntry(path) {
+  const old = baseName(path), name = prompt(`New name for ${old}`, old);
+  if (name == null || name === old) return;
+  await change("/api/rename", { path, name }, "renamed", [path]);
+}
+
+async function download(path) {
+  note(`Downloading ${baseName(path)} …`);
+  try {
+    const blob = await (await request("/api/download", { path })).blob();
+    const url = URL.createObjectURL(blob), link = el("a", { href: url, download: baseName(path) });
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    note(`${baseName(path)} : ${bytes(blob.size)} read from the cluster and handed to the browser, which saves it with its downloads (it may ask first).`);
+  } catch (error) { note("Download failed : " + error.message); if (error.status !== 400) fail(error); }
+}
+
+$("#files-all").onclick = (event) => {
+  state.chosen = new Set(event.target.checked ? selectable() : []);
+  for (const box of document.querySelectorAll("#files input[type=checkbox]")) box.checked = event.target.checked;
+  syncFiles();
+};
+$("#delete-selected").onclick = () => { if (state.chosen.size) removeEntries([...state.chosen]); };
+$("#move-selected").onclick = () => { state.clip = [...state.chosen]; syncFiles(); };
+$("#move-cancel").onclick = () => { state.clip = []; syncFiles(); };
+$("#move-here").onclick = async () => {
+  const paths = state.clip;
+  if (!paths.length || !state.dir || !confirm(`Move ${paths.length} entr${paths.length > 1 ? "ies" : "y"} into ${state.dir.path} ?\n` + paths.slice(0, 12).map((path) => "   " + baseName(path)).join("\n"))) return;
+  state.clip = []; note("Moving …");
+  await change("/api/move", { paths, directory: state.dir.path }, "moved", paths);
+};
+$("#new-folder").onclick = async () => {
+  const name = state.dir && prompt(`Name of the new directory in ${state.dir.path}`);
+  if (name) await change("/api/mkdir", { path: state.dir.path, name }, "created", []);
+};
+$("#p-close").onclick = () => { state.file = null; side(null); };
+$("#storage-refresh").onclick = () => { loadStorage(); if (state.dir) openDir(state.dir.path); };
+
+/* ---------- cluster ---------- */
+
+// The dashboards and the documentation of the cluster, as its site lists them ; only https addresses are made links.
+function renderLinks() {
+  const links = site().links.filter(([, url]) => /^https:\/\//.test(url));
+  $("#links").replaceChildren(...(links.length
+    ? links.flatMap(([label, url], index) => [index ? " · " : "", el("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, label)])
+    : ["No link is known for this cluster."]));
+}
+
+function renderPartitions() {
+  const mine = {};
+  for (const job of state.queue) if (job.state === "RUNNING") {
+    const use = mine[job.partition] ||= { jobs: 0, cpus: 0, gpus: 0 };
+    const count = (job.gres.match(/gpu(?::[^:,]+)?[:=](\d+)/) || [])[1];
+    use.jobs += 1; use.cpus += Number(job.cpus) || 0; use.gpus += Number(count) || (/gpu/.test(job.gres) ? 1 : 0);
+  }
+  $("#partitions").replaceChildren(...(state.partitions.length ? state.partitions.map((part) => {
+    const use = mine[part.name];
+    return el("tr", {},
+      el("td", { class: "id" }, part.name, part.default ? badge("default", "s-off") : null), el("td", { class: "num" }, part.time),
+      el("td", { class: part.limit ? "" : "muted" }, part.limit ? part.limit.replaceAll("gres/", "").replaceAll(",", ", ") : "none"),
+      el("td", { class: "num" }, `${part.idle} / ${part.total}`),
+      el("td", { class: use ? "" : "muted" }, use ? `${use.jobs} job${use.jobs > 1 ? "s" : ""}, ${use.cpus} CPU, ${use.gpus} GPU` : "–"));
+  }) : [el("tr", {}, el("td", { class: "empty", colspan: 5 }, "No partition listing."))]));
+}
+
+function renderAccount() {
+  const tile = (value, label, title) => el("div", { class: "tile", title }, el("b", {}, value), el("span", {}, label));
+  const { share, assoc } = state.account;
+  $("#account").replaceChildren(
+    tile(share ? Number(share.fairshare).toFixed(3) : "–", "fair-share factor", "sshare : 1 = no recent use, 0 = heavy recent use"),
+    tile(share ? Number(share.usage).toLocaleString() : "–", "recent usage (decayed)", "sshare RawUsage : resource-seconds, halved every week"),
+    tile(share ? share.account : "–", "account", "Slurm account of the jobs"),
+    tile(`${state.queue.length}${assoc && assoc.max_submit ? " / " + assoc.max_submit : ""}`, "jobs queued or running", "Against the maximum number of submitted jobs"));
+}
+
+async function loadCluster() {
+  try {
+    const data = await api("/api/overview");
+    $("#gpus").replaceChildren(...(data.gpus.length ? data.gpus.map((gpu) => el("tr", {},
+      el("td", { class: "id" }, gpu.name), el("td", { class: "num" }, gpu.free), el("td", { class: "num" }, gpu.total),
+      el("td", {}, el("span", { class: "meter" }, el("i", { style: `width:${gpu.total ? 100 * gpu.free / gpu.total : 0}%` })))))
+      : [el("tr", {}, el("td", { class: "empty", colspan: 4 }, "No GPU listing."))]));
+    state.partitions = data.partitions; renderPartitions();
+    state.account = { share: data.share, assoc: data.assoc }; renderAccount();
+    state.loaded.cluster = true;
+  } catch (error) { fail(error); }
+}
+$("#cluster-refresh").onclick = loadCluster;
+renderLinks();
+
+/* ---------- resources ---------- */
+
+const SVG = "http://www.w3.org/2000/svg";
+function svg(tag, props = {}, ...children) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [key, value] of Object.entries(props)) if (value != null) node.setAttribute(key, value);
+  node.append(...children.flat(Infinity).filter((child) => child != null));
+  return node;
+}
+const amount = (value) => value == null ? "–" : Number.isInteger(value) || value >= 100 ? Math.round(value).toLocaleString() : value.toFixed(value >= 10 ? 1 : 2);
+const size = (value) => bytes(value).replace(".0 ", " ");
+const clock = (epoch) => new Date(1000 * epoch).toLocaleTimeString();
+// A length of time in words (`duration` writes a clock, which reads as an hour of the day).
+const span = (seconds) => [[Math.floor(seconds / 3600), "h"], [Math.round(seconds % 3600 / 60), "min"]].filter(([count]) => count).map((pair) => pair.join(" ")).join(" ") || "under a minute";
+
+// One graph per resource ; a series is [field of a point, label, colour slot, optional detail of a point]. The colour follows the role :
+// 1 = allocated, 2 = in use, 3 = running, 4 = pending.
+const CHARTS = [
+  { id: "cpu", title: "CPU", unit: "cores", format: amount,
+    live: [["cpus", "allocated", 1], ["cpu_used", "in use", 2,
+      (point) => point.unrated ? ` · ${point.unrated} job${point.unrated > 1 ? "s" : ""} not measured yet` : ""]],
+    past: [["cpus", "allocated", 1], ["cpu_used", "used (mean of each finished job)", 2]] },
+  { id: "mem", title: "Memory", unit: "", format: size, binary: true,
+    live: [["mem", "allocated", 1], ["mem_used", "in use (resident)", 2]],
+    past: [["mem", "allocated", 1], ["mem_used", "peak of each finished job", 2]] },
+  { id: "gpu", title: "GPU", unit: "GPUs", format: amount, whole: true,
+    live: [["gpus", "allocated", 1], ["gpu_used", "in use (read on request)", 2,
+      (point) => point.gpu_read == null ? "" : ` · ${point.gpu_read} of ${point.gpus} GPU${point.gpus > 1 ? "s" : ""} read, ${bytes(point.gpu_mem)} of GPU memory`]],
+    past: [["gpus", "allocated", 1]] },
+  { id: "jobs", title: "Jobs", unit: "jobs", format: amount, whole: true,
+    live: [["running", "running", 3], ["pending", "pending", 4]],
+    past: [["running", "running", 3]] },
+];
+
+$("#charts").replaceChildren(...CHARTS.map((chart) => el("section", { class: "chart", id: "chart-" + chart.id },
+  el("div", { class: "bar" }, el("h2", {}, chart.title), el("span", { class: "muted scope" }), el("span", { class: "grow" }), el("span", { class: "muted" }, chart.unit)),
+  el("div", { class: "plot" }), el("div", { class: "legend" }),
+  el("details", { ontoggle: () => renderResources() }, el("summary", {}, "Table"), el("div", { class: "scroll" })))));
+
+// The top of the vertical axis and its step : 1, 2 or 5 times a power of ten, or a power of two for bytes.
+function ceiling(peak, chart) {
+  if (!(peak > 0)) peak = chart.binary ? 2 ** 30 : 1;
+  const raw = peak / 4;
+  let step;
+  if (chart.binary) step = 2 ** Math.ceil(Math.log2(raw));
+  else {
+    const power = 10 ** Math.floor(Math.log10(raw));
+    step = [1, 2, 5, 10].find((factor) => factor * power >= raw * 0.999) * power;
+    if (chart.whole) step = Math.max(1, step);
+  }
+  return { step, top: step * Math.max(1, Math.ceil(peak / step - 1e-9)) };
+}
+
+// Runs of consecutive points that have a value : a missing value or a pause of the sampling breaks the line.
+function runs(points, key, gap) {
+  const out = [];
+  let run = null, last = null;
+  for (const point of points) {
+    if (point[key] == null) { run = null; continue; }
+    if (!run || point.t - last.t > gap(last, point)) out.push(run = []);
+    run.push(point); last = point;
+  }
+  return out;
+}
+
+function draw(chart, points, from, to, live, days) {
+  const host = $("#chart-" + chart.id), plot = host.querySelector(".plot");
+  const series = (live ? chart.live : chart.past).map(([key, name, slot, detail]) => ({ key, name, color: `var(--s${slot})`, detail: detail || (() => "") }));
+  const W = Math.max(320, plot.clientWidth), H = 200, L = 62, R = 16, T = 8, B = 24;
+  const { step, top } = ceiling(Math.max(0, ...points.flatMap((point) => series.map((item) => point[item.key] ?? 0))), chart);
+  const x = (time) => L + (W - L - R) * (time - from) / (to - from), y = (value) => T + (H - T - B) * (1 - value / top);
+  const frame = svg("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img",
+    "aria-label": `${chart.title} : ${series.map((item) => item.name).join(", ")} over time ; the values are in the table below` });
+  const places = Math.max(0, Math.ceil(-Math.log10(step) - 1e-9));
+  for (let value = 0; value <= top * 1.0001; value += step) frame.append(
+    svg("line", { class: "rule", x1: L, x2: W - R, y1: y(value), y2: y(value) }),
+    svg("text", { x: L - 8, y: y(value) + 4, "text-anchor": "end" }, chart.binary ? chart.format(value) : value.toLocaleString(undefined, { minimumFractionDigits: places, maximumFractionDigits: places })));
+  const parts = W < 560 ? 3 : 6;
+  for (let index = 0; index <= parts; index += 1) {
+    const time = from + index * (to - from) / parts;
+    const label = live ? (index === parts ? "now" : to - from > 3600 ? Math.round((to - time) / 360) / 10 + " h" : Math.round((to - time) / 60) + " min") : days === 1 ? when(time).slice(11) : days <= 3 ? when(time).slice(5) : when(time).slice(5, 10);
+    frame.append(svg("line", { class: "rule", x1: x(time), x2: x(time), y1: T, y2: H - B }),
+      svg("text", { x: x(time), y: H - 7, "text-anchor": index === parts ? "end" : index ? "middle" : "start" }, label));
+  }
+  // A live line is broken where no sample was taken for 150 s, or 2.5 times the pace of the background sampling when the two samples
+  // around the hole were taken (the slower of the two : a change of pace is not a hole).
+  const gap = (before, after) => (live ? Math.max(150, 2.5 * (before.pace || 0), 2.5 * (after.pace || 0)) : Infinity);
+  series.forEach((item, index) => {
+    for (const run of runs(points, item.key, gap)) {
+      const path = run.map((point, place) => `${place ? "L" : "M"}${x(point.t).toFixed(1)} ${y(point[item.key]).toFixed(1)}`).join("");
+      if (run.length === 1) frame.append(svg("circle", { class: "dot", cx: x(run[0].t), cy: y(run[0][item.key]), r: 4.5, fill: item.color }));
+      else {
+        if (!index) frame.append(svg("path", { d: `${path}L${x(run.at(-1).t).toFixed(1)} ${y(0)}L${x(run[0].t).toFixed(1)} ${y(0)}Z`, fill: item.color, opacity: 0.12 }));
+        frame.append(svg("path", { class: "curve", d: path, stroke: item.color }));
+      }
+    }
+  });
+  // Hover : the pointer finds the nearest sample in time ; one readout for every series.
+  const cross = svg("line", { class: "cross", y1: T, y2: H - B, visibility: "hidden" });
+  const marks = series.map((item) => svg("circle", { class: "dot", r: 4.5, fill: item.color, visibility: "hidden" }));
+  const tip = el("div", { class: "tip", hidden: true });
+  const area = svg("rect", { x: L, y: T, width: W - L - R, height: H - T - B, fill: "transparent" });
+  const hide = () => { tip.hidden = true; for (const node of [cross, ...marks]) node.setAttribute("visibility", "hidden"); };
+  area.addEventListener("pointerleave", hide);
+  area.addEventListener("pointermove", (event) => {
+    if (!points.length) return;
+    const time = from + (to - from) * (event.clientX - frame.getBoundingClientRect().left - L) / (W - L - R);
+    const point = points.reduce((best, item) => Math.abs(item.t - time) < Math.abs(best.t - time) ? item : best);
+    const at = x(point.t);
+    cross.setAttribute("x1", at); cross.setAttribute("x2", at); cross.setAttribute("visibility", "visible");
+    series.forEach((item, index) => {
+      const value = point[item.key];
+      marks[index].setAttribute("visibility", value == null ? "hidden" : "visible");
+      if (value != null) { marks[index].setAttribute("cx", at); marks[index].setAttribute("cy", y(value)); }
+    });
+    tip.replaceChildren(el("div", { class: "muted" }, live ? clock(point.t) : when(point.t)),
+      ...series.map((item) => el("div", {}, el("span", { class: "key", style: `border-color:${item.color}` }),
+        el("b", {}, point[item.key] == null ? "–" : chart.format(point[item.key])), " ", item.name, item.detail(point))));
+    tip.hidden = false;
+    tip.style.left = (at + 14 + tip.offsetWidth > W ? Math.max(0, at - 14 - tip.offsetWidth) : at + 14) + "px";
+  });
+  frame.append(cross, ...marks, area);
+  plot.replaceChildren(frame, tip);
+  // Legend : over a period, the mean of each series ; live, its latest value, with its time when it is not the one of the last sample.
+  const figure = (item) => {
+    const known = points.filter((point) => point[item.key] != null);
+    if (!known.length) return "–";
+    if (!live) return chart.format(known.reduce((total, point) => total + point[item.key], 0) / known.length);
+    const point = known.at(-1);
+    return chart.format(point[item.key]) + (point === points.at(-1) ? "" : " at " + clock(point.t)) + item.detail(point);
+  };
+  host.querySelector(".scope").textContent = live ? "latest sample" : `mean of the last ${days} day${days > 1 ? "s" : ""}`;
+  host.querySelector(".legend").replaceChildren(...series.map((item) => el("span", {},
+    el("span", { class: "key", style: `border-color:${item.color}` }), item.name, el("b", {}, figure(item)))));
+  const details = host.querySelector("details");
+  if (details.open) details.querySelector(".scroll").replaceChildren(el("table", {},
+    el("thead", {}, el("tr", {}, el("th", {}, "Time"), series.map((item) => el("th", { class: "num" }, item.name)))),
+    el("tbody", {}, points.slice(-240).reverse().map((point) => el("tr", {}, el("td", {}, live ? clock(point.t) : when(point.t)),
+      series.map((item) => el("td", { class: "num" }, point[item.key] == null ? "–" : chart.format(point[item.key]))))))));
+}
+
+function renderResources() {
+  const data = state.resources;
+  if (!data || state.view !== "resources") return;
+  const live = !data.timeline, now = Date.now() / 1000;
+  let points, from, to;
+  if (live) { from = now - 3600 * reach(); to = now; points = data.samples.filter((point) => point.t >= from); }
+  else {
+    const line = data.timeline;
+    from = line.start; to = from + line.step * line.running.length;
+    points = line.running.map((_, index) => Object.fromEntries([["t", from + (index + 0.5) * line.step],
+      ...Object.entries(line).filter(([, values]) => Array.isArray(values)).map(([key, values]) => [key, values[index]])]));
+  }
+  for (const chart of CHARTS) draw(chart, points, from, to, live, data.days);
+  const last = points.at(-1);
+  $("#res-gpus").hidden = !live; $("#res-gpus").disabled = Boolean(state.probing) || !(last && last.gpus);
+  $("#res-stamp").textContent = live ? (points.length ? `${points.length} sample${points.length > 1 ? "s" : ""}, the last at ${clock(last.t)}` : "")
+    : (data.read ? `accounting read at ${new Date(1000 * data.read).toLocaleTimeString()}` : "");
+  $("#res-note").textContent = live
+    ? "What the running jobs of the account hold and use. " + (state.sample ? `Background sampling is on : the server adds a point about every ${pace(state.sample)}, this view open or not, until it stops or the sampling is set back to off`
+      : "A point is added at each refresh while this view is open only : turn « Background sampling » on to keep the history while it is closed")
+      + " (the server keeps a day of samples in memory ; they are lost when it stops, unless it was started with --keep). CPUs in use : from the CPU time the running steps spent, so a step has no figure for its first two minutes or so, and a job with such a step is left out of the total (the legend says how many) ; memory in use : their resident memory (sstat). "
+      + (site().notes.counters ? site().notes.counters + " "
+        : "The CPUs in use are a mean over the last three minutes or so, which assumes that the nodes refresh these counters about every 30 s. ")
+      + "Slurm does not know the load of a GPU : « Read GPU load now » asks nvidia-smi inside the jobs that hold one (4 jobs at most, the first node of each, "
+      + "once a minute at most) and draws the sum of the utilisations of the GPUs it read."
+      + (last && last.measured < last.running ? ` In use covers ${last.measured} of the ${last.running} running jobs` + (last.running > data.limit ? ` (${data.limit} are asked at most).` : " (the others did not answer).") : "")
+    : "From the accounting database, over the period of the Jobs view : means over " + span(data.timeline.step) + " of what the jobs held. The accounting keeps one figure per job, not a curve : "
+      + "the CPU use of a finished job is its mean and its memory is its peak, both spread over its whole run ; a running job counts in « allocated » only, a requeued job for its last run. "
+      + "The load of the GPUs is not recorded by Slurm" + (site().notes.resources ? " : " + site().notes.resources : "") + ".";
+}
+
+// Background sampling : the pace is a state of the server (off when it starts, unless --sample), shown here and changed from here.
+const pace = (seconds) => (seconds % 60 ? `${seconds} s` : seconds === 60 ? "minute" : `${seconds / 60} min`);
+function showPace() {
+  const select = $("#res-background"), value = String(state.sample || 0);
+  // A pace given by --sample that is not one of the list is added to it.
+  if (![...select.options].some((option) => option.value === value)) select.append(el("option", { value }, "every " + pace(state.sample)));
+  select.value = value;
+}
+// While a change is on its way, and for a status asked before its answer, `refresh` leaves the pace alone (as for the token of the usage service).
+$("#res-background").onchange = async () => {
+  const select = $("#res-background"), seconds = Number(select.value);
+  state.pacing = true; state.paced = (state.paced || 0) + 1; select.disabled = true;
+  try {
+    const data = await api("/api/background", { seconds });
+    state.sample = data.sample || 0;
+    toast(state.sample ? `Background sampling on : a sample every ${pace(state.sample)}, this view open or not, until the server stops` : "Background sampling off : a sample only while this view is open");
+  } catch (error) {
+    if (error.status === 404) toast("Not changed : the server that is running is older than this page ; restart it.");
+    else if (error.status === 400) toast("Not changed : " + error.message); else fail(error);
+  } finally { state.pacing = false; state.paced += 1; select.disabled = false; showPace(); renderResources(); }
+};
+
+// The hours a live graph covers (1, 6 or 24).
+const reach = () => Math.max(1, -Number($("#res-range").value));
+
+async function loadResources() {
+  const days = Math.max(0, Number($("#res-range").value)), ticket = state.asked = (state.asked || 0) + 1;
+  try {
+    const data = await api("/api/resources", { days, hours: reach() });
+    if (ticket !== state.asked) return;
+    state.resources = data; renderResources();
+  } catch (error) { if (error.status === 400) $("#res-note").textContent = "Could not read the resources : " + error.message; else fail(error); }
+}
+// A period chosen here is the one of the Jobs view too : both read the same answer of the accounting database.
+$("#res-range").onchange = async () => {
+  const days = $("#res-range").value;
+  await loadResources();
+  if (Number(days) <= 0 || $("#days").value === days) return;
+  $("#days").value = days;
+  soon();
+};
+$("#res-gpus").onclick = async () => {
+  if (state.probing) return;
+  state.probing = true; $("#res-gpus").disabled = true;
+  try {
+    const data = await api("/api/gpus", { hours: reach() });
+    if (Number($("#res-range").value) <= 0) { state.resources = data; renderResources(); }
+    toast(`GPU load read in ${data.probed} job${data.probed > 1 ? "s" : ""}` + (data.holders > data.probed ? ` of the ${data.holders} that hold a GPU` : "")
+      + " : " + data.gpus.map((gpu) => `${percent(gpu.load)}, ${bytes(gpu.memory)} of ${bytes(gpu.total)}`).join(" · "));
+  } catch (error) { if (error.status === 400) toast("GPU load not read : " + error.message); else fail(error); }
+  state.probing = false; renderResources();
+};
+
+// Storage as rings, the way a system monitor shows memory : space and number of files against their quota.
+function ring(used, limit, what, label) {
+  const share = limit ? used / limit : 0, ratio = Math.min(1, share), round = 2 * Math.PI * 30;
+  return el("div", { class: "ring" + (ratio > 0.9 ? " full" : ratio > 0.75 ? " warn" : "") },
+    svg("svg", { width: 76, height: 76, viewBox: "0 0 76 76", role: "img", "aria-label": `${what} : ${percent(share)} used` },
+      svg("circle", { class: "track", cx: 38, cy: 38, r: 30, fill: "none", "stroke-width": 8 }),
+      svg("circle", { class: "arc", cx: 38, cy: 38, r: 30, fill: "none", "stroke-width": 8, "stroke-linecap": ratio ? "round" : "butt",
+        "stroke-dasharray": `${ratio * round} ${round}`, transform: "rotate(-90 38 38)" }),
+      svg("text", { x: 38, y: 43, "text-anchor": "middle" }, percent(share))),
+    el("span", {}, label));
+}
+
+async function loadRings() {
+  try {
+    const data = await api("/api/storage");
+    const cards = data.areas.filter((area) => area.limit).map((area) => el("div", { class: "ringcard" },
+      el("div", {}, el("strong", {}, area.personal ? area.name : baseName(area.path)), " ", el("span", { class: "path muted" }, area.path)),
+      el("div", { class: "ringrow" },
+        ring(area.used, area.limit, "space", [el("b", {}, bytes(area.used)), el("br"), `of ${bytes(area.limit)}` + (area.whole ? " (file system)" : "")]),
+        area.files != null && area.files_limit ? ring(area.files, area.files_limit, "files", [el("b", {}, area.files.toLocaleString()), " files", el("br"), `of ${area.files_limit.toLocaleString()}`]) : null)));
+    $("#rings").replaceChildren(...(cards.length ? cards : [el("div", { class: "ringcard muted" }, "No quota reported.")]));
+    state.loaded.rings = true;
+  } catch (error) { fail(error); }
+}
+$("#res-storage-refresh").onclick = loadRings;
+new ResizeObserver(() => { cancelAnimationFrame(state.frame); state.frame = requestAnimationFrame(renderResources); }).observe($("#charts"));
+
+/* ---------- five quick clicks on the name of the page ---------- */
+
+// Purely local : nothing is asked to the server nor to the cluster, and no job is submitted.
+const WISHES = ["completed", "exit 0:0", "no restart", "100 % GPU", "0 s in queue", "checkpoint saved", "within quota", "converged"];
+const JOKES = [
+  "sbatch --wrap 'make coffee' : Submitted batch job 42.",
+  "☕ 42 imaginary jobs completed, exit 0:0, first try.",
+  "Your job is number 1 in the queue. The queue is imaginary.",
+  "All GPUs are free. Somewhere, in a parallel cluster.",
+  "scancel --me --bugs : 0 bugs cancelled, they were features.",
+  "The loss went down. So did the node. Unrelated.",
+  "Checkpoint saved. For once, before the preemption.",
+  "Fair-share restored to 1.000 : you have been very fair.",
+  "It converged ! (on the wrong seed, but still.)",
+  "PENDING (Reason=CoffeeBreak).",
+];
+function rain() {
+  if ($("#rain")) return;
+  toast(JOKES[Math.floor(Math.random() * JOKES.length)] + " (Nothing was sent to the cluster.)");
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const kinds = ["s-run", "s-done", "s-wait"];
+  const sky = el("div", { id: "rain", "aria-hidden": "true" }, Array.from({ length: 48 }, (_, index) => el("span", { class: "badge " + kinds[index % 3],
+    style: `left:${(2 + 96 * Math.random()).toFixed(1)}%; --turn:${Math.round(240 * Math.random() - 120)}deg; `
+      + `animation-duration:${(2.5 + 3 * Math.random()).toFixed(2)}s; animation-delay:${(2 * Math.random()).toFixed(2)}s` }, WISHES[index % WISHES.length])));
+  document.body.append(sky);
+  setTimeout(() => sky.remove(), 8000);
+}
+$("h1").addEventListener("click", () => {
+  const now = Date.now();
+  state.taps = (state.taps || []).filter((time) => now - time < 2000).concat(now);
+  if (state.taps.length >= 5) { state.taps = []; rain(); }
+});
+
+/* ---------- views and refresh loop ---------- */
+
+function loadView(force) {
+  if (state.view === "resources") { if (force || !state.loaded.rings) loadRings(); if (!force) loadResources(); }
+  if (state.view === "storage" && (force || !state.loaded.storage)) loadStorage();
+  if (state.view === "cluster" && (force || !state.loaded.cluster)) loadCluster();
+}
+for (const button of $("#views").children) button.onclick = () => {
+  state.view = button.dataset.view;
+  for (const other of $("#views").children) {
+    other.classList.toggle("on", other === button);
+    $("#view-" + other.dataset.view).hidden = other !== button;
+  }
+  loadView();
+};
+
+// A page left open and untouched stops asking the cluster after IDLE : any click or key resumes.
+const IDLE = 4 * 3600 * 1000;
+function touch() {
+  state.touched = Date.now();
+  if (state.paused) { state.paused = false; refresh(); }
+}
+for (const name of ["pointerdown", "keydown"]) document.addEventListener(name, touch, true);
+
+function schedule() {
+  clearInterval(state.timer);
+  const seconds = Number($("#interval").value);
+  // A hidden tab keeps the mark of its name up to date with one attempt a minute at most, successful or not.
+  if (seconds) state.timer = setInterval(() => {
+    if (Date.now() - state.touched > IDLE) {
+      if (!state.paused) {
+        state.paused = true; document.title = "⏸ Cluster monitor";
+        $("#stamp").textContent = "paused after 4 h without a click or a key : click anywhere to resume";
+      }
+    } else if (!document.hidden || Date.now() - state.last >= 60000) refresh();
+  }, seconds * 1000);
+}
+$("#interval").onchange = schedule;
+$("#refresh").onclick = () => refresh(true);
+$("#days").onchange = () => { if (Number($("#res-range").value) > 0) $("#res-range").value = $("#days").value; soon(); };
+$("#filter").oninput = renderHistory;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  if (state.paused) touch(); else if (Number($("#interval").value)) { state.touched = Date.now(); refresh(); }
+});
+
+if (!token) banner("Access token missing : open the address printed by server.py in the terminal.");
+else { refresh(); schedule(); }
+</script>
+</body>
+</html>
