@@ -15,16 +15,7 @@ Configured for the [Mila](https://mila.quebec) cluster by default (`mila.py`) ; 
 
 ## Requirements
 
-Python ≥ 3.9 (standard library only), Linux or macOS, a recent Firefox, Chromium or Safari, and an SSH alias that keeps its connection open :
-
-```
-Host mila
-    ControlMaster auto
-    ControlPersist yes
-    ControlPath ~/.ssh/cm-%r@%h:%p
-```
-
-(`mila init` from [milatools](https://github.com/mila-iqia/milatools) writes this for you.)
+Python ≥ 3.9 (standard library only), Linux or macOS, a recent Firefox, Chromium or Safari, and an SSH alias that keeps its connection open. On Mila, mila init from milatools sets this up.
 
 ## Usage
 
