@@ -10,10 +10,14 @@ import posixpath
 import re
 import secrets
 import shlex
+import shutil
+import signal
+import stat
 import statistics
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
 import urllib.error
@@ -23,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 # The date of what was never read. The clock of `time.monotonic` starts anywhere, near zero in a new process on some
 # systems (seen on macOS) : no fixed number is old for it, and a kept answer is used only when there is one.
 NEVER = float("-inf")
@@ -317,6 +321,42 @@ class Cluster:
     DOWNLOAD = 100 * 2**20
     PROTECTED = (".ssh", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".bash_aliases", ".profile", ".login", ".logout",
                  ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".cshrc", ".tcshrc", ".kshrc")
+    SECRETS = (".ssh", ".gnupg", ".netrc", ".git-credentials", ".config/git/credentials", ".config/gh", ".aws", ".azure", ".config/gcloud",
+               ".kube", ".docker/config.json", ".config/rclone", ".pgpass", ".my.cnf", ".pypirc", ".npmrc", ".boto", ".s3cfg", ".vault-token",
+               ".password-store", ".local/share/keyrings", ".cache/huggingface/token", ".cache/huggingface/stored_tokens", ".huggingface/token",
+               ".kaggle", ".config/kaggle", ".config/wandb", ".cargo/credentials", ".cargo/credentials.toml", ".config/pypoetry/auth.toml", ".gem/credentials",
+               ".oci", ".local/share/jupyter/runtime", ".bash_history", ".zsh_history", ".python_history", ".claude/.credentials.json", ".codex/auth.json",
+               ".config/github-copilot", ".comet.config", ".terraform.d/credentials.tfrc.json")
+    SHIELD = (
+        'home=$(realpath -e -- "$HOME" 2>/dev/null) || exit 4; hidden=(); links=(); rooms=(); '
+        'trail() { local at=$1 rest=$2 part target hops=0; found=(); '
+        'while [ -n "$rest" ]; do part=${rest%%/*}; if [ "$part" = "$rest" ]; then rest=; else rest=${rest#*/}; fi; '
+        'case "$part" in ""|.) continue;; ..) [ -n "$at" ] && found+=("$at"); at=${at%/*}; continue;; esac; '
+        'if [ -L "$at/$part" ]; then hops=$(( hops + 1 )); [ "$hops" -gt 40 ] && return 1; found+=("$at/$part"); '
+        'target=$(readlink -- "$at/$part") || return 1; case "$target" in /*) at=;; esac; rest="$target${rest:+/$rest}"; '
+        'else at="$at/$part"; fi; done; end=${at:-/}; }; '
+        'for name in "${secrets[@]}"; do hidden+=("$home/$name"); '
+        'if trail "$home" "$name"; then hidden+=("$end"); { [ -e "$end" ] || [ -L "$end" ]; } && links+=("${found[@]}"); '
+        'if [ -d "$end" ]; then twice=; for item in "${rooms[@]}"; do [ "$item" = "$end" ] && twice=1; done; [ -z "$twice" ] && rooms+=("$end"); fi; '
+        'else links+=("${found[@]}"); fi; done; '
+        'if [ "${#rooms[@]}" -gt 0 ]; then while IFS= read -r -d "" item; do '
+        'if trail "" "$item"; then hidden+=("$end"); fi; links+=("${found[@]}"); '
+        'done < <(find -P "${rooms[@]}" -mindepth 1 -maxdepth 2 -type l -print0 2>/dev/null | head -z -n 200); fi; '
+        'secret() { local item; for item in "${hidden[@]}"; do [ "$1" = "$item" ] && return 0; case "$1" in "$item"/*) return 0;; esac; done; return 1; }; '
+        'holds() { local item; for item in "${hidden[@]}"; do case "$item" in "$1"/*) { [ -e "$item" ] || [ -L "$item" ]; } && return 0;; esac; done; return 1; }; '
+        'leads() { local item; for item in "${links[@]}"; do [ "$item" = "$1" ] && return 0; case "$item" in "$1"/*) return 0;; esac; done; return 1; }; '
+        'sealed() { secret "$1" || holds "$1" || leads "$1"; }; '
+    )
+    READ = SHIELD + (
+        'real=$(realpath -e -- "$1" 2>/dev/null) || exit 2; secret "$real" && exit 3; '
+        'trail "" "$1" || exit 2; for item in "${found[@]}" "$end"; do secret "$item" && exit 3; done; '
+        '[ -f "$real" ] && [ -r "$real" ] || exit 2; '
+        'exec 3< "$real" || exit 2; '
+        'if [ -e /proc/self/fd/3 ]; then held=$(realpath -e -- /proc/self/fd/3 2>/dev/null); '
+        '[ "$held" = "$real" ] || { [ -n "$held" ] && secret "$held" && exit 3; }; fi; '
+    )
+    SEALED = "protected : keys and credential files are not read from here ; read this one in a terminal"
+    HOMELESS = "the home directory of the cluster cannot be resolved : nothing is read nor changed from here"
     TOOLS = (
         "say() { printf '%s\\t%s\\t%s\\n' \"$1\" \"$2\" \"${3##*$'\\n'}\"; }; "
         'renice -n 19 -p $$ >/dev/null 2>&1; command -v ionice >/dev/null && ionice -c 3 -p $$ 2>/dev/null; '
@@ -342,14 +382,16 @@ class Cluster:
     )
     REMOVE = (
         'for target in "$@"; do refuse "$target" && continue; '
-        'if message=$(gentle rm -rf --one-file-system -- "$target" 2>&1); then say done "$target" ""; '
+        'if leads "$parent/${target##*/}"; then say refused "$target" "protected : a link that leads to keys or credentials is not deleted from here"; '
+        'elif message=$(gentle rm -rf --one-file-system -- "$target" 2>&1); then say done "$target" ""; '
         'else [ $? = 124 ] && message="stopped after $budget s to spare the login node : partly deleted ; delete it again, or remove a large tree from a job"; '
         'say failed "$target" "$message"; fi; done'
     )
     RENAME = (
         'target=$1; new="${target%/*}/$2"; '
         'if refuse "$target"; then :; '
-        'elif protected "$parent/$2"; then say refused "$target" "protected name"; '
+        'elif sealed "$parent/${target##*/}"; then say refused "$target" "protected : what holds keys or credentials is neither renamed nor moved from here"; '
+        'elif protected "$parent/$2" || secret "$parent/$2"; then say refused "$target" "protected name"; '
         'elif [ -e "$new" ] || [ -L "$new" ]; then say exists "$target" "that name is already taken"; '
         'elif message=$(mv -n -T -- "$target" "$new" 2>&1) && gone "$target"; then say done "$new" ""; '
         'else say failed "$target" "${message:-not renamed : that name was taken meanwhile}"; fi'
@@ -359,7 +401,8 @@ class Cluster:
         'if [ -z "$to" ] || ! within "$to" || [ ! -d "$dest" ]; then say refused "$dest" "not a directory of the storage areas"; exit 0; fi; '
         'device=$(stat -L -c %d -- "$dest"); '
         'for target in "$@"; do new="$dest/${target##*/}"; refuse "$target" && continue; '
-        'if protected "$to/${target##*/}"; then say refused "$target" "protected destination"; '
+        'if sealed "$parent/${target##*/}"; then say refused "$target" "protected : what holds keys or credentials is neither renamed nor moved from here"; '
+        'elif protected "$to/${target##*/}" || secret "$to/${target##*/}"; then say refused "$target" "protected destination"; '
         'elif [ -e "$new" ] || [ -L "$new" ]; then say exists "$target" "an entry of that name is already there"; '
         'elif [ "$(stat -L -c %d -- "$parent")" != "$device" ]; then '
         'say refused "$target" "another file system : that is a copy, not a move ; use rsync from a terminal or a job"; '
@@ -370,7 +413,7 @@ class Cluster:
     MKDIR = (
         'new="$1/$2"; to=$(realpath -e -- "$1" 2>/dev/null) || to=; '
         'if [ -z "$to" ] || ! within "$to" || [ ! -d "$1" ]; then say refused "$1" "not a directory of the storage areas"; '
-        'elif protected "$to/$2"; then say refused "$new" "protected name"; '
+        'elif protected "$to/$2" || secret "$to/$2"; then say refused "$new" "protected name"; '
         'elif [ -e "$new" ] || [ -L "$new" ]; then say exists "$new" "that name is already taken"; '
         'elif message=$(mkdir -- "$new" 2>&1); then say done "$new" ""; '
         'else say failed "$new" "$message"; fi'
@@ -423,7 +466,7 @@ class Cluster:
         "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits & done; wait"
     )
 
-    def __init__(self, host, extra_roots=(), writable=False, actions=True, sample=0, keep=None, site=None):
+    def __init__(self, host, extra_roots=(), writable=False, actions=False, sample=0, keep=None, site=None):
         self.host = host
         self.site = site or Site()
         self.sample = sample
@@ -612,7 +655,7 @@ class Cluster:
         """An integer argument of the page, clamped to a range."""
         try:
             return max(low, min(int(value), high))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValueError("not a number") from None
 
     @staticmethod
@@ -826,7 +869,9 @@ class Cluster:
                 return {"path": "", "text": "", "missing": "No output file is recorded for this job (interactive job, or not started yet)."}
             with self.lock:
                 self.outputs[(job, stream)] = path
-        code, text, _ = self.run(f'[ -r "$1" ] && tail -n {lines} -- "$1" | tail -c {self.OUTPUT}', args=(path,))
+        code, text, _ = self.run(self.sealing() + self.READ + f'tail -n {lines} <&3 | tail -c {self.OUTPUT}', args=(path,))
+        if code in (3, 4):
+            return {"path": path, "text": "", "missing": self.SEALED if code == 3 else self.HOMELESS}
         if code:
             return {"path": path, "text": "", "missing": "This file does not exist or is not readable : not written yet, deleted, or purged."}
         return {"path": path, "text": text, "missing": ""}
@@ -846,7 +891,7 @@ class Cluster:
     def act(self, action, job):
         """One of `ACTIONS` ; the per-job ones take a validated identifier. Sent once, never repeated."""
         if not self.actions:
-            raise PermissionError("job actions are disabled : the server was started with --no-actions")
+            raise PermissionError("job actions are disabled : start the server with --actions")
         template = self.ACTIONS[action]
         args = (self.job_id(job),) if '"$1"' in template else ()
         code, out, err = self.run(template, args=args, once=True)
@@ -1331,13 +1376,27 @@ class Cluster:
                 "truncated": len(entries) >= self.LISTED,
                 "changes": self.writable and area in self.site.AREAS and place in self.site.AREAS, "error": err if code else ""}
 
+    def sealing(self):
+        """The start of a script that tells what holds keys or credentials (`SECRETS`, under the home directory of the cluster).
+
+        `SHIELD` resolves each name one component at a time (`trail`) : `hidden` holds the name and the real path it leads to, `links`
+        every symbolic link met on the way to one that exists, and every directory left by a `..` of a link ; the links found in a
+        directory of the list (two levels, 200 at most : a key of `~/.ssh` that is a link to a file kept elsewhere) are resolved the same
+        way, so that what they lead to is hidden too. `READ` then resolves the path asked and stops with the code 3 when the real
+        file, or any place the path goes through, is one of `hidden` or inside one, whatever the link that led to it (4 : the home directory cannot be resolved, and nothing is
+        read) ; the file is then opened once, and what was opened is checked again where the system tells it (`/proc`), so that a path
+        changed between the check and the reading gives no credential : the readers take the open file, not the path. A change script refuses to rename or move one, what is inside one and a directory that holds one — under another name it
+        would be read — and to delete, rename or move a link of `links` or a directory that holds one : without the link, what it led to
+        would be a file like any other."""
+        return "secrets=(" + " ".join(shlex.quote(name) for name in self.SECRETS) + "); "
+
     def preview(self, path, end):
-        """The first or last 256 KiB of a file, as text ; a binary file is reported, not shown."""
+        """The first or last 256 KiB of a file, as text ; a binary file is reported, not shown ; a key or a credential file is refused."""
         path = self.path(path)
         tool = "head" if end == "head" else "tail"
-        code, out, _ = self.run(f'[ -f "$1" ] && [ -r "$1" ] && stat -L -c %s -- "$1" && {tool} -c {self.PREVIEW} -- "$1"', args=(path,))
+        code, out, _ = self.run(self.sealing() + self.READ + f'stat -L -c %s -- /dev/fd/3 && {tool} -c {self.PREVIEW} <&3', args=(path,))
         if code:
-            raise ValueError("not a readable file")
+            raise ValueError({3: self.SEALED, 4: self.HOMELESS}.get(code, "not a readable file"))
         size, _, text = out.partition("\n")
         binary = "\0" in text
         return {"path": path, "size": self.number(size), "binary": binary, "text": "" if binary else text,
@@ -1385,12 +1444,14 @@ class Cluster:
         path = self.path(path)
         with self.long:
             code, out, _ = self.run(
-                '[ -f "$1" ] && [ -r "$1" ] && size=$(stat -L -c %s -- "$1") || exit 2; echo "$size"; '
-                f'[ "$size" -le {self.DOWNLOAD} ] && head -c "$size" -- "$1"',
+                self.sealing() + self.READ + 'size=$(stat -L -c %s -- /dev/fd/3) || exit 2; echo "$size"; '
+                f'[ "$size" -le {self.DOWNLOAD} ] && head -c "$size" <&3',
                 timeout=300, args=(path,), raw=True,
             )
         cut = out.find(b"\n")
         size, data = out[:max(cut, 0)], memoryview(out)[cut + 1:]
+        if code in (3, 4):
+            raise ValueError(self.SEALED if code == 3 else self.HOMELESS)
         if code == 2 or not size.isdigit():
             raise ValueError("not a readable file")
         if int(size) > self.DOWNLOAD:
@@ -1435,11 +1496,13 @@ class Cluster:
         returned with a warning."""
         self.permit()
         roots, keep = (" ".join(shlex.quote(item) for item in items) for items in (self.personal().values(), self.PROTECTED))
-        code, out, err = self.run(f"roots=({roots}); keep=({keep}); budget={self.WALK}; " + self.TOOLS + script,
+        code, out, err = self.run(f"roots=({roots}); keep=({keep}); budget={self.WALK}; " + self.sealing() + self.SHIELD + self.TOOLS + script,
                                   timeout=self.WALK + 20, args=args, once=True)
         results = [dict(zip(("status", "path", "message"), (line.split("\t", 2) + ["", ""])[:3])) for line in out.splitlines() if line]
         ok = code == 0 and bool(results) and all(result["status"] == "done" for result in results)
         error = "" if results else (err or "no answer from the cluster")
+        if code == 4 and not results:
+            error = self.HOMELESS
         if code == 255:
             error = "the SSH connection dropped during the change : the outcomes listed may be incomplete, check the directory"
         with self.lock:
@@ -1480,6 +1543,8 @@ class Handler(BaseHTTPRequestHandler):
     token = ""
     page = None
     hosts = ()
+    door = None
+    OPENING = 120
 
     def log_message(self, *args):
         """No request log (job names and paths stay out of the terminal)."""
@@ -1511,9 +1576,78 @@ class Handler(BaseHTTPRequestHandler):
         """Loopback `Host` header (DNS rebinding) and the token in a custom header (cross-site requests).
 
         The comparison is on bytes : `compare_digest` raises on a non-ASCII string."""
-        if self.headers.get("Host") not in self.hosts:
+        origin = self.headers.get("Origin")
+        if self.headers.get("Host") not in self.hosts or (origin is not None and origin not in ["http://" + host for host in self.hosts]):
             return False
-        return secrets.compare_digest(self.headers.get("X-Auth", "").encode(), self.token.encode())
+        known = secrets.compare_digest(self.headers.get("X-Auth", "").encode(), self.token.encode())
+        if known and self.door:
+            self.forget()
+        return known
+
+    @classmethod
+    def usher(cls, address):
+        """Opens the address in the default browser without writing its token on a command line.
+
+        An address given to the browser as an argument is shown by `ps` to every user of the computer, for as long as the
+        browser it started runs. The browser is given a private file instead (a directory of its owner alone, a file of
+        mode 600), which sends it to the address : `ps` shows a path. The directory is made in the home directory, where the
+        browsers that live in a sandbox (snap, Flatpak) can read a file, which they cannot under `/tmp` ; in the directory of
+        temporary files when that fails. It is removed at the first request that carries the token, after two minutes, and
+        when the server stops. False when no file could be written or no browser started : the address printed is then opened by hand."""
+        home = os.path.expanduser("~")
+        parents = ([home] if os.path.isabs(home) else []) + [None]
+        for parent in parents:
+            cls.sweep(parent)
+        for parent in parents:
+            try:
+                cls.door = door = Path(tempfile.mkdtemp(prefix="cluster-monitor-opening-", dir=parent))
+                with open(os.open(door / "open.html", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
+                    file.write('<!doctype html><meta charset="utf-8"><title>Cluster monitor</title><meta name="referrer" content="no-referrer">'
+                               f'<meta http-equiv="refresh" content="0; url={address}"><a href="{address}">Open the cluster monitor</a>\n')
+                break
+            except (OSError, RuntimeError):
+                cls.forget()
+        else:
+            print("The file that hands the address to the browser could not be written : open the address above.", flush=True)
+            return False
+        timer = threading.Timer(cls.OPENING, cls.forget)
+        timer.daemon = True
+        timer.start()
+        try:
+            started = webbrowser.open((door / "open.html").as_uri())
+        except Exception:
+            started = False
+        if not started:
+            cls.forget()
+            print("The browser could not be started : open the address above.", flush=True)
+        return bool(started)
+
+    @classmethod
+    def sweep(cls, parent):
+        """Removes the files of the address left there by servers that were killed : the directories of that name of this user, older
+        than the time a server keeps one, that hold nothing else."""
+        try:
+            for door in Path(parent or tempfile.gettempdir()).glob("cluster-monitor-opening-*"):
+                state = door.lstat()
+                if (stat.S_ISDIR(state.st_mode) and state.st_uid == os.getuid() and time.time() - state.st_mtime > cls.OPENING + 60
+                        and all(entry.name == "open.html" and stat.S_ISREG(entry.lstat().st_mode) for entry in door.iterdir())):
+                    shutil.rmtree(door, ignore_errors=True)
+        except OSError:
+            pass
+
+    @classmethod
+    def forget(cls):
+        """Removes the file that handed the address to the browser ; safe to call twice, and from several threads."""
+        door, cls.door = cls.door, None
+        if door:
+            shutil.rmtree(door, ignore_errors=True)
+
+    @staticmethod
+    def port(text):
+        """The `--port` argument : 0 lets the system choose a free one."""
+        if not (text.isascii() and text.isdigit()) or int(text) > 65535:
+            raise argparse.ArgumentTypeError("a port is a number from 0 to 65535 (0 : a free one, chosen by the system)")
+        return int(text)
 
     def guarded(self, call):
         """Runs an API call and maps its failures to HTTP statuses : the page always gets a JSON answer.
@@ -1585,7 +1719,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.reply(403, {"error": "forbidden"})
         length = self.headers.get("Content-Length") or ""
-        if not (length.isascii() and length.isdigit()) or int(length) > 512 * 1024 or "application/json" not in self.headers.get("Content-Type", ""):
+        if not (length.isascii() and length.isdigit()) or int(length) > 512 * 1024 or self.headers.get_content_type() != "application/json":
             return self.reply(400, {"error": "bad request"})
         length = int(length)
         raw = self.rfile.read(length)
@@ -1608,14 +1742,16 @@ def main():
     parser.add_argument("--site", default="mila", metavar="NAME",
                         help="the cluster : the name of the file beside server.py that describes it (mila, the default), or generic for a Slurm cluster of which nothing is known")
     parser.add_argument("--ssh-host", metavar="ALIAS", help="alias of the login node in the SSH configuration (the one of the site without it : mila)")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=Handler.port, default=8765, metavar="N", help="local port (8765 without it ; 0 : a free one, chosen by the system)")
     parser.add_argument("--no-browser", action="store_true", help="print the address without opening it")
     parser.add_argument("--root", action="append", default=[], metavar="PATH",
                         help="one more storage area to browse, e.g. the shared directory of a group (repeatable)")
     parser.add_argument("--writable", action="store_true",
                         help="allow the storage view to delete, rename, move entries and create directories (read-only without it)")
+    parser.add_argument("--actions", action="store_true",
+                        help="allow the job actions (kill, kill pending, kill all, SIGTERM, hold, release, requeue) : the page only watches without it")
     parser.add_argument("--no-actions", action="store_true",
-                        help="disable the job actions (kill, hold, release, requeue) : the page only watches")
+                        help="the page only watches : the default since 0.1.6, kept so that a command written for an earlier version still starts")
     parser.add_argument("--sample", type=int, default=0, metavar="SECONDS",
                         help="start with the background sampling on : a sample of the resources of the running jobs every SECONDS (30 to 3600), "
                              "view open or not ; off without it, and turned on, off or changed from the Resources view")
@@ -1629,6 +1765,8 @@ def main():
         parser.error("--root takes an absolute path")
     if args.sample and not Cluster.PACE[0] <= args.sample <= Cluster.PACE[1]:
         parser.error("--sample takes {} to {} seconds".format(*Cluster.PACE))
+    if args.actions and args.no_actions:
+        parser.error("--actions and --no-actions cannot be given together")
 
     try:
         site = Site.load(args.site)(os.environ)
@@ -1640,22 +1778,24 @@ def main():
     if host.startswith("-"):
         parser.error("--ssh-host takes the alias of the login node, not an option of ssh")
     try:
-        Handler.cluster = Cluster(host, roots, writable=args.writable, actions=not args.no_actions, sample=args.sample, keep=args.keep, site=site)
+        Handler.cluster = Cluster(host, roots, writable=args.writable, actions=args.actions, sample=args.sample, keep=args.keep, site=site)
     except (OSError, ValueError) as error:
         parser.exit(1, f"Cannot use the file of --keep : {getattr(error, 'strerror', None) or error}. Nothing was changed.\n")
     threading.Thread(target=Handler.cluster.sample_forever, daemon=True).start()
     Handler.token = secrets.token_urlsafe(24)
     Handler.page = Path(__file__).resolve().parent / "index.html"
-    Handler.hosts = (f"127.0.0.1:{args.port}", f"localhost:{args.port}")
     ThreadingHTTPServer.daemon_threads = True
     try:
         server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     except OSError as error:
         parser.exit(1, f"Cannot listen on port {args.port} ({error.strerror}) : another monitor may be running ; stop it or use --port.\n")
-    address = f"http://127.0.0.1:{args.port}/#t={Handler.token}"
+    port = server.server_address[1]
+    # A browser leaves the port out of `Host` when it is the one of http.
+    Handler.hosts = (f"127.0.0.1:{port}", f"localhost:{port}") + (("127.0.0.1", "localhost") if port == 80 else ())
+    address = f"http://127.0.0.1:{port}/#t={Handler.token}"
     print(f"Cluster monitor {VERSION}, {site.NAME} (ssh {host}) : {address}\n(loopback only ; the token changes at every launch ; Ctrl+C to stop)", flush=True)
     print("Storage : " + ("files can be deleted, renamed and moved (--writable)." if args.writable else "read-only (add --writable to manage files)."), flush=True)
-    print("Jobs : " + ("watched only (--no-actions)." if args.no_actions else "can be killed, held and requeued from the page (--no-actions to only watch)."), flush=True)
+    print("Jobs : " + ("can be killed, held and requeued from the page (--actions)." if args.actions else "watched only (add --actions to kill, hold and requeue)."), flush=True)
     print("Resources : " + (f"sampled every {args.sample} s in the background, view open or not (--sample ; changed in the Resources view)" if args.sample
                             else "sampled while the view is open (background sampling off : turned on in the Resources view, or with --sample)")
           + (f" ; kept in {args.keep} (--keep)." if args.keep else " ; kept in memory only (--keep to keep a day over a restart)."), flush=True)
@@ -1666,12 +1806,18 @@ def main():
         lack = Handler.cluster.sharing()
         if lack:
             print(lack.replace("`", ""), flush=True)
-    if not args.no_browser:
-        webbrowser.open(address)
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), lambda *_: sys.exit(0))
     try:
+        if not args.no_browser:
+            # In a thread : `webbrowser` waits for the end of a program named in `BROWSER`, and the page is served meanwhile.
+            threading.Thread(target=Handler.usher, args=(address,), daemon=True).start()
         server.serve_forever()
     except KeyboardInterrupt:
         print()
+    finally:
+        Handler.forget()
 
 
 if __name__ == "__main__":

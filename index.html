@@ -186,12 +186,12 @@ summary { cursor: pointer; color: var(--muted); font-size: 12px; }
   <section>
     <div class="bar">
       <h2>Queue</h2><span id="queue-count" class="muted"></span><span class="grow"></span>
-      <button id="kill-selected" class="danger" disabled>Kill selected</button>
-      <button id="kill-pending" class="danger">Kill pending</button>
-      <button id="kill-all" class="danger">Kill all</button>
+      <button id="kill-selected" class="danger" disabled hidden>Kill selected</button>
+      <button id="kill-pending" class="danger" hidden>Kill pending</button>
+      <button id="kill-all" class="danger" hidden>Kill all</button>
     </div>
     <div class="scroll"><table>
-      <thead><tr><th><input type="checkbox" id="pick-all" aria-label="Select all"></th><th>Job</th><th>Name</th><th>Partition</th>
+      <thead><tr><th><input type="checkbox" id="pick-all" aria-label="Select all" hidden></th><th>Job</th><th>Name</th><th>Partition</th>
         <th>State</th><th class="num">Elapsed</th><th class="num">Left</th><th title="In the time zone of this computer">Start</th><th class="num">CPUs</th><th class="num">Memory</th>
         <th>GPU</th><th title="Running : the node. Pending : why it waits. Priority = other jobs are ahead ; Resources = it is next and waits for free resources ; ReqNodeNotAvail = the nodes it asks for are down or reserved, it only has to wait ; QOS…Limit, AssocGrp… = a per-user limit is reached ; JobHeldUser = held (Release in the job panel) ; BeginTime = its start date is not reached">Node / reason</th><th></th></tr></thead>
       <tbody id="queue"></tbody>
@@ -400,7 +400,7 @@ window.addEventListener("hashchange", () => { if (/t=[\w-]+/.test(location.hash)
 
 const state = { queue: [], history: [], summary: null, unfolded: new Set(), rated: new Map(), picked: new Set(), open: null, tab: "output", view: "jobs",
   timer: null, busy: false, host: "", dir: null, file: null, loaded: {},
-  writable: false, actions: true, site: null, items: new Map(), chosen: new Set(), clip: [],
+  writable: false, actions: false, site: null, items: new Map(), chosen: new Set(), clip: [],
   touched: Date.now(), paused: false };
 
 function el(tag, props = {}, ...children) {
@@ -502,8 +502,10 @@ function renderQueue() {
   const running = state.queue.filter((job) => job.state === "RUNNING").length;
   document.title = (running ? `▶ ${running} · ` : "") + "Cluster monitor";
   $("#mark").hidden = !running;
-  $("#queue-count").textContent = state.queue.length
-    ? `${state.queue.filter((j) => j.state === "RUNNING").length} running, ${state.queue.filter((j) => j.state === "PENDING").length} pending` : "";
+  // Without the job actions the buttons are not there : the head of the queue says why, and how to get them.
+  $("#queue-count").textContent = [state.queue.length
+    ? `${state.queue.filter((j) => j.state === "RUNNING").length} running, ${state.queue.filter((j) => j.state === "PENDING").reduce((total, j) => total + tasks(j.id), 0)} pending` : "",
+    state.actions ? "" : "watched only : start the server with --actions to kill, hold or requeue"].filter(Boolean).join(" · ");
   if (!state.queue.length) body.replaceChildren(el("tr", {}, el("td", { class: "empty", colspan: 13 }, "No job in the queue.")));
   else body.replaceChildren(...folded(state.queue, (job) => {
     const box = el("input", { type: "checkbox", "aria-label": "Select job " + job.id, checked: state.picked.has(job.id),
@@ -586,7 +588,7 @@ function memoryCell(job) {
 
 function renderHistory() {
   const needle = $("#filter").value.trim().toLowerCase();
-  const rows = state.history.filter((job) => !needle || (job.name + " " + job.state + " " + job.id).toLowerCase().includes(needle));
+  const rows = state.history.filter((job) => !needle || (job.name + " " + job.state + " " + job.state.replaceAll("_", " ") + " " + job.id).toLowerCase().includes(needle));
   const cut = state.finished > state.history.length ? ` (the ${state.history.length} most recent of ${state.finished})` : "";
   $("#history-count").textContent = (state.history.length ? `${rows.length} of ${state.history.length}${cut} · ` : "")
     + (state.read ? `accounting read at ${new Date(1000 * state.read).toLocaleTimeString()}` : "");
@@ -790,7 +792,7 @@ async function refresh(manual) {
   try {
     const enrolled = state.enrolled, paced = state.paced;
     const status = await api("/api/status");
-    state.host = status.host; state.writable = status.writable; state.actions = status.actions !== false; state.site = { ...SITE, ...(status.site || state.site) };
+    state.host = status.host; state.writable = status.writable; state.actions = status.actions === true; state.site = { ...SITE, ...(status.site || state.site) };
     state.sharing = status.connected ? "" : String(status.sharing || "");
     if (!state.pacing && paced === state.paced) { state.sample = status.sample || 0; showPace(); }
     if (!state.enrolling && enrolled === state.enrolled) state.token = Boolean(status.enrolled);
@@ -876,7 +878,7 @@ function showHead() {
   $("#d-state").replaceChildren(badge(job.state));
   const queued = state.queue.some((item) => item.id === job.id);
   const buttons = [];
-  if (!state.actions) buttons.push(el("span", { class: "muted" }, "Job actions are disabled (--no-actions)."));
+  if (!state.actions) buttons.push(el("span", { class: "muted" }, "Job actions are disabled (start the server with --actions)."));
   else if (queued) {
     buttons.push(el("button", { class: "danger", onclick: () => act("cancel", job) }, "Kill"));
     if (job.state === "RUNNING") buttons.push(el("button", { title: "scancel --signal=TERM : lets the job save its state and be requeued", onclick: () => act("term", job) }, "Send SIGTERM"));
