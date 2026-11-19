@@ -56,8 +56,9 @@ class Site(server.Site):
     }
     QUOTA = "disk-quota 2>&1; echo '{sep}'; df -P -B1 -- \"$ARCHIVE\" 2>/dev/null | tail -n 1"
     AVAIL = "savail"
-    HOME_ROW = re.compile(r"^\s*/\S+\s+(\S+?)\*?\s+\S+\s+(\S+)\s+\S+\s+(\d+)\*?\s+\S+\s+(\d+)\s+\S+\s*$", re.M)
-    SCRATCH_ROW = re.compile(r"\|\|\s*([\d.]+\s*\w+)\s*\|\s*([\d.]+\s*\w+|unlimited)\s*\|\|\s*(\d+)\s*\|\s*(\d+|unlimited)")
+    # A figure over its quota is followed by `*`, a grace period may be two words (`6 days`), a count may hold commas ; a row is one line.
+    HOME_ROW = re.compile(r"^[ \t]*/\S+[ \t]+(\S+?)\*?[ \t]+\S+[ \t]+(\S+)[ \t]+\S+(?:[ \t]+[a-z]+)?[ \t]+([\d,]+)\*?[ \t]+\S+[ \t]+([\d,]+)[ \t]+\S+(?:[ \t]+[a-z]+)?[ \t\r]*$", re.M)
+    SCRATCH_ROW = re.compile(r"\|\|\s*([\d.,]+\s*\w+)\*?\s*\|\s*([\d.,]+\s*\w+|unlimited)\s*\|\|\s*([\d,]+)\*?\s*\|\s*([\d,]+|unlimited)")
     AVAIL_ROW = re.compile(r"^(\S+)\s+(\d+)\s*/\s*(\d+)\s*$", re.M)
     SARC = "https://sarc.mila.quebec"
     SARC_JOBS = 500
@@ -66,14 +67,14 @@ class Site(server.Site):
 
     def quota(self, text, areas, sep):
         """Home and scratch from `disk-quota` (space and number of files against their quota), the archive from `df` ; the text of `disk-quota` is shown as it is."""
-        size, number = server.Cluster.size, server.Cluster.number
+        size, number = (lambda text: server.Cluster.size(text.replace(",", ""))), (lambda text: server.Cluster.number(text.replace(",", "")))
         quota, _, archive = text.partition(sep)
         home = self.HOME_ROW.search(quota)
         if home and "HOME" in areas:
-            areas["HOME"].update(used=size(home[1]), limit=size(home[2]), files=int(home[3]), files_limit=int(home[4]))
+            areas["HOME"].update(used=size(home[1]), limit=size(home[2]), files=number(home[3]), files_limit=number(home[4]))
         scratch = self.SCRATCH_ROW.search(quota)
         if scratch and "SCRATCH" in areas:
-            areas["SCRATCH"].update(used=size(scratch[1]), limit=size(scratch[2]), files=int(scratch[3]), files_limit=number(scratch[4]) or None)
+            areas["SCRATCH"].update(used=size(scratch[1]), limit=size(scratch[2]), files=number(scratch[3]), files_limit=number(scratch[4]) or None)
         fields = archive.split()
         if len(fields) >= 4 and fields[1].isdigit() and "ARCHIVE" in areas:
             areas["ARCHIVE"].update(used=int(fields[2]), limit=int(fields[1]))

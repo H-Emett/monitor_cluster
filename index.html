@@ -128,7 +128,31 @@ tr.fold td { white-space: normal; }
 tr.fold .meter { display: inline-flex; width: 160px; margin: 0 8px; }
 tr.member td.id { padding-left: 24px; }
 .meter i.part { flex: none; }
+.meter.ask { position: relative; }
+.meter.ask b { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); }
 .meter i.wait { background: var(--wait); } .meter i.done { background: var(--done); } .meter i.bad { background: var(--fail); }
+.mosaic-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chips button { border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 600; border-color: transparent; font-variant-numeric: tabular-nums; }
+.chips button[aria-pressed=true] { border-color: currentColor; box-shadow: 0 0 0 1px currentColor; }
+.chips.some button[aria-pressed=false] { opacity: .55; }
+.chips button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mosaic-bar .hint { flex-basis: 100%; font-size: 12px; min-height: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mosaic { --cell: 12px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 18px; padding: 10px 14px; max-height: 62vh; overflow-y: auto;
+  scrollbar-color: var(--muted) var(--panel); }
+.tess { min-width: 0; max-width: 100%; }
+.tess > button { display: block; max-width: 420px; margin-bottom: 3px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.tess > button:hover { color: var(--text); }
+.tess > div { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.mosaic i { flex: none; width: var(--cell); height: var(--cell); border-radius: 2px; cursor: pointer; background: var(--fail); }
+.mosaic i.s-run { background: var(--run); } .mosaic i.s-done { background: var(--done); } .mosaic i.s-off { background: var(--off); }
+.mosaic i.s-wait { background: none; border: 2px solid var(--wait); }
+.mosaic i.many { width: auto; height: auto; min-height: var(--cell); padding: 0 3px; border-width: 1px; font: 600 9px/10px var(--mono); color: var(--wait); }
+.mosaic i.u0 { background: color-mix(in srgb, var(--done) 22%, transparent); } .mosaic i.u1 { background: color-mix(in srgb, var(--done) 48%, transparent); }
+.mosaic i.u2 { background: color-mix(in srgb, var(--done) 74%, transparent); } .mosaic i.u3 { background: var(--done); } .mosaic i.u4 { background: var(--fail); }
+.mosaic i.un { background: none; border: 1px dashed var(--muted); }
+.mosaic i:hover, .mosaic i.open { outline: 2px solid var(--text); outline-offset: 1px; }
+.mosaic p { margin: 0; color: var(--muted); }
 #d-pattern { flex: 1; min-width: 180px; font-family: var(--mono); font-size: 12px; }
 #rain { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 5; }
 #rain .badge { position: absolute; top: -40px; animation: fall linear forwards; }
@@ -186,11 +210,23 @@ summary { cursor: pointer; color: var(--muted); font-size: 12px; }
   <section>
     <div class="bar">
       <h2>Queue</h2><span id="queue-count" class="muted"></span><span class="grow"></span>
+      <input type="text" id="queue-filter" placeholder="Filter by name, state, id, partition or node" aria-label="Filter the queue" hidden>
+      <select id="queue-group" aria-label="Grouping of the queue" hidden title="With --ultra the jobs of a same name are folded under one line, as the tasks of an array are. Name pattern : the name with its numbers left out (run-3-lr0.1 and run-4-lr0.01 are run-#-lr#)">
+        <option value="family">grouped by name pattern</option><option value="name">grouped by name</option><option value="">arrays only</option>
+      </select>
+      <select id="ultra-view" aria-label="Jobs drawn as a mosaic or listed in tables" hidden title="Mosaic : the queue and the finished jobs each drawn as one square per job, coloured by its state, the jobs of a group side by side ; a hollow square waits, a click opens the job. Tables : the lines of a job, and the boxes that select jobs to kill">
+        <option value="mosaic">mosaic</option><option value="table">tables</option>
+      </select>
       <button id="kill-selected" class="danger" disabled hidden>Kill selected</button>
       <button id="kill-pending" class="danger" hidden>Kill pending</button>
       <button id="kill-all" class="danger" hidden>Kill all</button>
     </div>
-    <div class="scroll"><table>
+    <div class="mosaic-bar" id="bar-queue" hidden>
+      <div class="chips" id="chips-queue" role="group" aria-label="Jobs of the queue by state : a state that is pressed keeps its jobs only"></div>
+      <span class="muted hint" id="hint-queue"></span>
+    </div>
+    <div class="mosaic" id="mosaic-queue" hidden></div>
+    <div class="scroll" id="table-queue"><table>
       <thead><tr><th><input type="checkbox" id="pick-all" aria-label="Select all" hidden></th><th>Job</th><th>Name</th><th>Partition</th>
         <th>State</th><th class="num">Elapsed</th><th class="num">Left</th><th title="In the time zone of this computer">Start</th><th class="num">CPUs</th><th class="num">Memory</th>
         <th>GPU</th><th title="Running : the node. Pending : why it waits. Priority = other jobs are ahead ; Resources = it is next and waits for free resources ; ReqNodeNotAvail = the nodes it asks for are down or reserved, it only has to wait ; QOS…Limit, AssocGrp… = a per-user limit is reached ; JobHeldUser = held (Release in the job panel) ; BeginTime = its start date is not reached">Node / reason</th><th></th></tr></thead>
@@ -209,7 +245,16 @@ summary { cursor: pointer; color: var(--muted); font-size: 12px; }
       </select>
     </div>
     <div class="tiles" id="summary"></div>
-    <div class="scroll"><table>
+    <div class="mosaic-bar" id="bar-history" hidden>
+      <div class="chips" id="chips-history" role="group" aria-label="Finished jobs by state : a state that is pressed keeps its jobs only"></div>
+<span class="grow"></span>
+      <select id="mosaic-colour" aria-label="What the colour of a finished job says" title="By state, or by the share of its request a job used : the paler a square, the less of what it asked for it used ; red, it ended for lack of it ; dashed, the accounting has no figure">
+        <option value="">coloured by state</option><option value="mem">by memory used / asked</option><option value="cpu">by CPUs used / allocated</option><option value="time">by time used / limit</option>
+      </select>
+      <span class="muted hint" id="hint-history"></span>
+    </div>
+    <div class="mosaic" id="mosaic-history" hidden></div>
+    <div class="scroll" id="table-history"><table>
       <thead><tr><th>Job</th><th>Name</th><th>Partition</th><th>State</th><th>Exit</th><th class="num">Elapsed</th>
         <th class="num" title="Share of the time limit that was used">of limit</th>
         <th class="num" title="Peak memory of the steps (MaxRSS) against the memory allocated to the job (mem of AllocTRES ; ReqMem without it)">Memory peak / asked</th>
@@ -231,7 +276,7 @@ summary { cursor: pointer; color: var(--muted); font-size: 12px; }
         <th>Notes</th></tr></thead>
       <tbody id="advice"></tbody>
     </table></div>
-    <p class="note">From the finished jobs of the period, grouped by name. A suggestion is a starting point : it knows the runs of this period only, and not the GPU memory.</p>
+    <p class="note" id="advice-note">From the finished jobs of the period, grouped by name. A suggestion is a starting point : it knows the runs of this period only, and not the GPU memory.</p>
   </section>
 </main>
 
@@ -389,8 +434,10 @@ function sited(text, values = {}) {
 // Token : read once from the address printed by server.py, kept for the tab, removed from the address bar.
 const token = (() => {
   const match = location.hash.match(/t=([\w-]+)/);
+  // The address loses its token whether the tab can keep it or not.
+  if (match) history.replaceState(null, "", location.pathname);
   try {
-    if (match) { sessionStorage.setItem("token", match[1]); history.replaceState(null, "", location.pathname); }
+    if (match) sessionStorage.setItem("token", match[1]);
     return (match && match[1]) || sessionStorage.getItem("token") || "";
   } catch (error) { return match ? match[1] : ""; }
 })();
@@ -400,7 +447,7 @@ window.addEventListener("hashchange", () => { if (/t=[\w-]+/.test(location.hash)
 
 const state = { queue: [], history: [], summary: null, unfolded: new Set(), rated: new Map(), picked: new Set(), open: null, tab: "output", view: "jobs",
   timer: null, busy: false, host: "", dir: null, file: null, loaded: {},
-  writable: false, actions: false, site: null, items: new Map(), chosen: new Set(), clip: [],
+  writable: false, actions: false, ultra: false, files: true, shown: [], limit: { queue: 200, history: 200 }, focus: null, kept: [], mosaic: { queue: { states: new Set(), tiles: [], squares: [], drawn: null, legend: "" }, history: { states: new Set(), tiles: [], squares: [], drawn: null, legend: "" } }, site: null, items: new Map(), chosen: new Set(), clip: [],
   touched: Date.now(), paused: false };
 
 function el(tag, props = {}, ...children) {
@@ -451,8 +498,9 @@ function fail(error) {
 /* ---------- formats ---------- */
 
 function stateClass(name) {
-  if (name === "RUNNING" || name === "COMPLETING") return "s-run";
-  if (name === "PENDING" || name === "CONFIGURING" || name === "REQUEUED" || name === "SUSPENDED") return "s-wait";
+  // The states of squeue(1) that are neither an end nor a failure : at work, or held back.
+  if (["RUNNING", "COMPLETING", "SIGNALING", "STAGE_OUT", "RESIZING"].includes(name)) return "s-run";
+  if (["PENDING", "CONFIGURING", "REQUEUED", "SUSPENDED", "STOPPED", "RESV_DEL_HOLD", "REQUEUE_HOLD", "REQUEUE_FED", "SPECIAL_EXIT"].includes(name)) return "s-wait";
   if (name === "COMPLETED") return "s-done";
   if (name === "CANCELLED" || name === "PREEMPTED") return "s-off";
   return "s-fail";
@@ -495,9 +543,11 @@ function meter(used, limit) {
 
 function renderQueue() {
   const body = $("#queue");
-  const ids = new Set(state.queue.map((job) => job.id));
-  const shown = new Set(shownJobs().map((job) => job.id));
-  for (const id of [...state.picked]) if (!ids.has(id) || !shown.has(id)) state.picked.delete(id);
+  // The lines of the table, then those that are drawn : a job that has no row is never selected.
+  const { jobs, lines } = layout(), drawn = tiled() ? [] : lines.slice(0, room("queue"));
+  state.shown = drawn.filter((line) => line.job).map((line) => line.job); state.kept = jobs;
+  const shown = new Set(state.shown.map((job) => job.id));
+  for (const id of [...state.picked]) if (!shown.has(id)) state.picked.delete(id);
   // The name of the page carries a mark while a job runs : visible on the tab from another one.
   const running = state.queue.filter((job) => job.state === "RUNNING").length;
   document.title = (running ? `▶ ${running} · ` : "") + "Cluster monitor";
@@ -505,9 +555,11 @@ function renderQueue() {
   // Without the job actions the buttons are not there : the head of the queue says why, and how to get them.
   $("#queue-count").textContent = [state.queue.length
     ? `${state.queue.filter((j) => j.state === "RUNNING").length} running, ${state.queue.filter((j) => j.state === "PENDING").reduce((total, j) => total + tasks(j.id), 0)} pending` : "",
+    jobs.length < state.queue.length ? `${jobs.length} of ${state.queue.length} match the filter` : "",
     state.actions ? "" : "watched only : start the server with --actions to kill, hold or requeue"].filter(Boolean).join(" · ");
-  if (!state.queue.length) body.replaceChildren(el("tr", {}, el("td", { class: "empty", colspan: 13 }, "No job in the queue.")));
-  else body.replaceChildren(...folded(state.queue, (job) => {
+  if (tiled()) body.replaceChildren();
+  else if (!lines.length) body.replaceChildren(el("tr", {}, el("td", { class: "empty", colspan: 13 }, state.queue.length ? "No job of the queue matches the filter." : "No job in the queue.")));
+  else body.replaceChildren(...folded(drawn, (job) => {
     const box = el("input", { type: "checkbox", "aria-label": "Select job " + job.id, checked: state.picked.has(job.id),
       onclick: (event) => { event.stopPropagation(); event.target.checked ? state.picked.add(job.id) : state.picked.delete(job.id); syncPicks(); } });
     const usual = (state.waits || {})[job.partition];
@@ -520,9 +572,129 @@ function renderQueue() {
       el("td", { class: "num" }, job.cpus), el("td", { class: "num" }, job.mem),
       el("td", {}, gres(job.gres)), el("td", {}, job.where),
       el("td", { class: "act" }, state.actions ? el("button", { class: "small danger", onclick: (event) => { event.stopPropagation(); act("cancel", job); } }, "Kill") : null));
-  }));
+  }), ...[more(lines.length - drawn.length, "queue", 13, renderQueue)].filter(Boolean));
   syncPicks();
+  renderMosaic("queue");
 }
+
+/* ---------- mosaic (--ultra) ---------- */
+
+// With --ultra, hundreds to thousands of jobs are seen at once : the queue and the finished jobs are each drawn as a mosaic, one square per
+// job, coloured by its state, the jobs of a group side by side, in place of their table (which « tables » brings back). The counts by state
+// above each one are buttons : a pressed state keeps its jobs only, in the mosaic and in the table.
+const MOSAIC = 12000, RANK = ["s-run", "s-wait", "s-done", "s-fail", "s-off"];
+const tiled = () => state.ultra && $("#ultra-view").value === "mosaic";
+const wanted = (kind, job) => !state.mosaic[kind].states.size || state.mosaic[kind].states.has(job.state);
+const lower = (name) => name.toLowerCase().replaceAll("_", " ");
+// What the filter of each table reads of a job.
+const FITS = {
+  queue: (job, needle) => !needle || [job.id, job.name, job.state, lower(job.state), job.partition, job.where].join(" ").toLowerCase().includes(needle),
+  history: (job, needle) => !needle || (job.name + " " + job.state + " " + lower(job.state) + " " + job.id).toLowerCase().includes(needle),
+};
+const sought = (kind) => (kind === "history" || state.ultra ? $(kind === "queue" ? "#queue-filter" : "#filter").value.trim().toLowerCase() : "");
+// The group of a square : the one of the queue (`groupOf`), and one group for the jobs that stand alone.
+function tessOf(job) {
+  const key = groupOf(job);
+  return key.startsWith("name ") ? key.slice(5) : key ? `${key}_* ${job.name}` : "jobs outside an array";
+}
+// A group kept alone (a click on its name) : in both mosaics, both tables and the sizing, until it is released.
+const focused = (job) => state.focus == null || tessOf(job) === state.focus;
+const kept = (kind, job) => FITS[kind](job, sought(kind)) && focused(job);
+function alone(name) {
+  state.focus = state.focus === name ? null : name;
+  renderQueue(); renderHistory(); renderAdvice();
+}
+const describe = (job) => [job.id, job.name, lower(job.state), job.partition,
+  "end" in job ? `ended ${stamp(job.end)} after ${duration(job.elapsed)}` : job.state === "RUNNING" ? `${job.elapsed} elapsed on ${job.where}` : job.where].filter(Boolean).join(" · ");
+
+// The share of its request a finished job used, and its shade : four steps, red where the request was not enough, dashed without a figure.
+const USES = {
+  mem: (job) => (job.mem_peak != null && job.mem_req ? [job.mem_peak / job.mem_req, job.state === "OUT_OF_MEMORY", `memory ${bytes(job.mem_peak)} of ${bytes(job.mem_req)}`] : null),
+  cpu: (job) => (job.cpu_eff != null ? [job.cpu_eff, false, `CPUs ${amount(job.cpu_eff * job.cpus)} of ${job.cpus}`] : null),
+  time: (job) => (job.limit ? [job.elapsed / job.limit, job.state === "TIMEOUT", `time ${duration(job.elapsed)} of ${duration(job.limit)}`] : null),
+};
+const shade = (use) => (!use ? "un" : use[1] ? "u4" : "u" + Math.min(3, Math.floor(4 * use[0])));
+
+function renderMosaic(kind) {
+  const view = state.mosaic[kind], on = tiled(), box = $("#mosaic-" + kind), use = kind === "history" ? USES[$("#mosaic-colour").value] : null;
+  const paint = (job) => (use ? shade(use(job)) : stateClass(job.state)), rank = (job) => (!use ? RANK.indexOf(stateClass(job.state)) : !use(job) ? 4 : use(job)[1] ? 3 : Math.min(2, use(job)[0]));
+  $("#bar-" + kind).hidden = !state.ultra; box.hidden = !on; $("#table-" + kind).hidden = on; $("#mosaic-colour").hidden = !on;
+  if (!state.ultra) return;
+  const pool = state[kind].filter((job) => kept(kind, job));
+  // The counts by state, of the jobs the filter keeps ; a pressed state stays there at 0, to be released.
+  const counts = new Map([...view.states].map((name) => [name, 0]));
+  for (const job of pool) counts.set(job.state, (counts.get(job.state) || 0) + (job.state === "PENDING" ? tasks(job.id) : 1));
+  const order = [...counts].sort((one, two) => RANK.indexOf(stateClass(one[0])) - RANK.indexOf(stateClass(two[0])) || one[0].localeCompare(two[0]));
+  $("#chips-" + kind).className = "chips" + (view.states.size ? " some" : "");
+  $("#chips-" + kind).replaceChildren(...order.map(([name, count]) => el("button", { class: stateClass(name), "aria-pressed": String(view.states.has(name)), "data-state": name,
+    title: `Show the ${lower(name)} jobs only (press again to release)` }, `${lower(name)} ${count.toLocaleString()}`)),
+    ...(view.states.size ? [el("button", { class: "small", "data-state": "" }, "all states")] : []),
+    ...(state.focus != null ? [el("button", { class: "small", "data-focus": "", title: "Show every group again" }, `group ${state.focus} ✕`)] : []));
+  if (!on) { view.tiles = []; view.squares = []; view.drawn = null; box.replaceChildren(); $("#hint-" + kind).textContent = view.legend = ""; return; }
+  const groups = new Map();
+  let total = 0;
+  for (const job of pool) {
+    if (!wanted(kind, job)) continue;
+    const key = tessOf(job);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(job); total += 1;
+  }
+  // The groups by name, each one by state : a square stays where the eye left it from one refresh to the next.
+  const names = [...groups.keys()].sort((one, two) => one.localeCompare(two, undefined, { numeric: true }));
+  const tiles = [], bounds = [];
+  for (const name of names) {
+    const members = groups.get(name).map((job, at) => [rank(job), at, job]).sort((one, two) => one[0] - two[0] || one[1] - two[1]);
+    const from = tiles.length;
+    for (const [, , job] of members) if (tiles.length < MOSAIC) tiles.push(job);
+    if (tiles.length > from) bounds.push([name, from, tiles.length, members.length]);
+  }
+  const none = !state[kind].length ? (kind === "queue" ? "No job in the queue." : "No finished job in this period.")
+    : !pool.length ? (state.focus != null && !sought(kind) ? "No job of this group here." : "No job matches the filter.") : "No job of this state matches.";
+  view.legend = total ? `${total.toLocaleString()} line${total > 1 ? "s" : ""} in ${groups.size.toLocaleString()} group${groups.size > 1 ? "s" : ""} : one square each, `
+    + (kind === "queue" ? "hollow while it waits ; " : use ? "the paler, the less of its request it used ; " : "") + "point at a square to read its job, click to open it ; click the name of a group to keep it alone"
+    + (total > tiles.length ? ` · the first ${tiles.length.toLocaleString()} are drawn` : "")
+    + (kind === "history" && state.finished > state.history.length ? ` · the ${state.history.length.toLocaleString()} most recent of ${state.finished.toLocaleString()} finished jobs` : "") : "";
+  if (!box.matches(":hover")) $("#hint-" + kind).textContent = view.legend;
+  // Drawn again only when a square changed : most refreshes of a large account leave them as they are.
+  const size = tiles.length <= 400 ? 14 : tiles.length <= 1500 ? 11 : tiles.length <= 4000 ? 9 : 7;
+  const drawn = [size, none, ...bounds.map((bound) => bound.join(" ")), ...tiles.map((job) => job.id + " " + paint(job))].join("\n");
+  view.tiles = tiles;
+  if (drawn !== view.drawn) {
+    view.drawn = drawn;
+    view.squares = tiles.map((job, at) => {
+      const many = job.state === "PENDING" ? tasks(job.id) : 1;
+      return el("i", { class: paint(job) + (many > 1 ? " many" : ""), "data-at": at }, many > 1 ? "×" + many : null);
+    });
+    box.style.setProperty("--cell", size + "px");
+    box.replaceChildren(...(total ? bounds.map(([name, from, to, count]) => el("div", { class: "tess" },
+      el("button", { class: "link plain", "data-group": name, title: `${name} : keep this group alone, or show them all again` }, `${name} · ${count.toLocaleString()}`),
+      el("div", {}, ...view.squares.slice(from, to)))) : [el("p", {}, none)]));
+  }
+  view.squares.forEach((square, at) => square.classList.toggle("open", tiles[at].id === state.open));
+}
+for (const kind of ["queue", "history"]) {
+  const view = state.mosaic[kind], render = () => (kind === "queue" ? renderQueue() : renderHistory());
+  const tile = (event) => (event.target.dataset && event.target.dataset.at != null ? view.tiles[event.target.dataset.at] : null);
+  $("#mosaic-" + kind).addEventListener("click", (event) => {
+    const job = tile(event);
+    if (job) openJob(job.id); else if (event.target.dataset && event.target.dataset.group != null) alone(event.target.dataset.group);
+  });
+  $("#mosaic-" + kind).addEventListener("mouseover", (event) => {
+    const job = tile(event);
+    const use = job && kind === "history" && USES[$("#mosaic-colour").value], said = use && use(job);
+    if (job) $("#hint-" + kind).textContent = event.target.title = describe(job) + (said ? ` · ${said[2]} (${percent(said[0])})` : "");
+  });
+  $("#mosaic-" + kind).addEventListener("mouseleave", () => { $("#hint-" + kind).textContent = view.legend; });
+  $("#chips-" + kind).addEventListener("click", (event) => {
+    const name = event.target.dataset ? event.target.dataset.state : null;
+    if (event.target.dataset && event.target.dataset.focus != null) return alone(state.focus);
+    if (name == null) return;
+    if (!name) view.states.clear(); else if (!view.states.delete(name)) view.states.add(name);
+    render();
+  });
+}
+$("#ultra-view").onchange = () => { renderQueue(); renderHistory(); };
+$("#mosaic-colour").onchange = renderHistory;
 
 // The tasks of a job array (`123_4`, `123_[5-9]`) under one line : how many run, wait, ended, and a bar. Click to unfold.
 const arrayOf = (id) => id.includes("_") ? id.split("_")[0] : "";
@@ -534,37 +706,64 @@ function tasks(id) {
     return total + (Number.isFinite(high) ? Math.floor((high - low) / (Number(step) || 1)) + 1 : 1);
   }, 0);
 }
-// The jobs that have a row : not the tasks of a folded array, which are never selected while they are hidden.
-function shownJobs() {
-  const sizes = new Map();
-  for (const job of state.queue) if (arrayOf(job.id)) sizes.set(arrayOf(job.id), (sizes.get(arrayOf(job.id)) || 0) + 1);
-  return state.queue.filter((job) => !(sizes.get(arrayOf(job.id)) > 1) || state.unfolded.has(arrayOf(job.id)));
+// With --ultra the jobs of a same name are folded as the tasks of an array are : by the name with its numbers left out, or by the name itself.
+// The key of the group of a job, of the queue or finished : '' for a job that stands alone.
+function groupOf(job) {
+  const mode = state.ultra ? $("#queue-group").value : "";
+  return mode ? "name " + (mode === "family" ? job.name.replace(/\d+(\.\d+)?/g, "#") : job.name) : arrayOf(job.id);
 }
-function folded(queue, row) {
+// The rows a table draws at most with --ultra, which lists thousands of jobs : the rest comes on request (`more`).
+const room = (table) => (state.ultra ? state.limit[table] : Infinity);
+function more(left, table, columns, render) {
+  return left > 0 ? el("tr", {}, el("td", { class: "empty", colspan: columns }, `${left.toLocaleString()} more line${left > 1 ? "s" : ""} not drawn. `,
+    el("button", { class: "small", onclick: () => { state.limit[table] *= 4; render(); } }, "Show more"))) : null;
+}
+// The lines of the queue, in one pass over it : a job alone, or the head of a group (the tasks of an array ; with --ultra the jobs of a
+// same name) followed by its members when it is unfolded. With --ultra, of the jobs that match the filter only.
+function layout() {
+  const jobs = state.ultra ? state.queue.filter((job) => wanted("queue", job) && kept("queue", job)) : state.queue;
   const groups = new Map();
-  for (const job of queue) if (arrayOf(job.id)) groups.set(arrayOf(job.id), [...(groups.get(arrayOf(job.id)) || []), job]);
-  const out = [], shown = new Set();
-  for (const job of queue) {
-    const base = arrayOf(job.id), members = groups.get(base) || [];
-    if (members.length < 2) { out.push(row(job)); continue; }
-    if (shown.has(base)) continue;
-    shown.add(base);
-    const past = state.history.filter((item) => arrayOf(item.id) === base);
+  for (const job of jobs) {
+    const key = groupOf(job);
+    if (key && !groups.has(key)) groups.set(key, []);
+    if (key) groups.get(key).push(job);
+  }
+  const lines = [], seen = new Set();
+  for (const job of jobs) {
+    const key = groupOf(job), members = groups.get(key) || [];
+    if (members.length < 2) { lines.push({ job }); continue; }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push({ key, members });
+    if (state.unfolded.has(key)) for (const member of members) lines.push({ job: { ...member, member: true } });
+  }
+  return { jobs, lines };
+}
+function folded(lines, row) {
+  // What ended of each group, counted once for the whole table.
+  const past = new Map();
+  if (lines.some((line) => line.key)) for (const item of state.history) {
+    const key = groupOf(item);
+    if (!key) continue;
+    if (!past.has(key)) past.set(key, { done: 0, bad: 0 });
+    past.get(key)[item.state === "COMPLETED" ? "done" : "bad"] += 1;
+  }
+  return lines.map((line) => {
+    if (line.job) return row(line.job);
+    const { key, members } = line, named = key.startsWith("name "), ended = past.get(key) || { done: 0, bad: 0 };
     const count = { run: members.filter((item) => item.state === "RUNNING").length,
-      wait: members.filter((item) => item.state !== "RUNNING").reduce((total, item) => total + tasks(item.id), 0),
-      done: past.filter((item) => item.state === "COMPLETED").length, bad: past.filter((item) => item.state !== "COMPLETED").length };
-    const total = count.run + count.wait + count.done + count.bad, open = state.unfolded.has(base);
+      wait: members.filter((item) => item.state !== "RUNNING").reduce((total, item) => total + tasks(item.id), 0), done: ended.done, bad: ended.bad };
+    const total = count.run + count.wait + count.done + count.bad, open = state.unfolded.has(key);
     const part = (kind, title) => count[kind] ? el("i", { class: "part " + kind, style: `width:${100 * count[kind] / total}%`, title }) : null;
-    out.push(el("tr", { class: "fold", onclick: () => { open ? state.unfolded.delete(base) : state.unfolded.add(base); renderQueue(); } },
-      el("td", {}), el("td", { class: "id" }, el("button", { class: "link plain", "aria-expanded": String(open), title: "Show or hide the tasks of this array" }, (open ? "▾ " : "▸ ") + base + "_*")),
-      el("td", { class: "name", title: members[0].name }, members[0].name),
-      el("td", { colspan: 10 }, `array of ${total} task${total > 1 ? "s" : ""}`,
+    return el("tr", { class: "fold", onclick: () => { open ? state.unfolded.delete(key) : state.unfolded.add(key); renderQueue(); } },
+      el("td", {}), el("td", { class: "id" }, el("button", { class: "link plain", "aria-expanded": String(open), title: named ? "Show or hide the jobs of this name" : "Show or hide the tasks of this array" },
+        (open ? "▾ " : "▸ ") + (named ? `${members.length} jobs` : key + "_*"))),
+      el("td", { class: "name", title: named ? key.slice(5) : members[0].name }, named ? key.slice(5) : members[0].name),
+      el("td", { colspan: 10 }, named ? `${total} job${total > 1 ? "s" : ""} or task${total > 1 ? "s" : ""}` : `array of ${total} task${total > 1 ? "s" : ""}`,
         el("span", { class: "meter" }, part("done", "completed"), part("bad", "ended otherwise"), part("run", "running"), part("wait", "pending")),
         [[count.run, "running"], [count.wait, "pending"], [count.done, "completed"], [count.bad, "ended otherwise"]].filter(([value]) => value).map(([value, label]) => `${value} ${label}`).join(" · "),
-        state.finished > state.history.length ? " (ended tasks : among the listed jobs only)" : "")));
-    if (open) for (const member of members) out.push(row({ ...member, member: true }));
-  }
-  return out;
+        state.finished > state.history.length ? (named ? " (ended jobs : among the listed jobs only)" : " (ended tasks : among the listed jobs only)") : ""));
+  });
 }
 
 // A job opens from its identifier too, a button the keyboard reaches (a table row cannot take the focus).
@@ -575,7 +774,14 @@ function syncPicks() {
   for (const id of ["kill-selected", "kill-pending", "kill-all", "pick-all"]) $("#" + id).hidden = !state.actions;
   $("#kill-selected").disabled = !count;
   $("#kill-selected").textContent = count ? `Kill selected (${count})` : "Kill selected";
-  $("#pick-all").checked = count > 0 && count === shownJobs().length;
+  // A selection is made of the rows of the table. Under the mosaic the button kills the jobs it shows, once a filter, a state or a group
+  // narrowed them (« Kill all » is there for the whole queue) ; one job is killed from its panel.
+  if (tiled()) {
+    const narrowed = state.kept.length > 0 && state.kept.length < state.queue.length && state.kept.length <= MOSAIC;
+    $("#kill-selected").hidden = !state.actions || !narrowed; $("#kill-selected").disabled = !narrowed;
+    $("#kill-selected").textContent = `Kill the ${state.kept.reduce((total, job) => total + tasks(job.id), 0).toLocaleString()} shown`;
+  }
+  $("#pick-all").checked = count > 0 && count === state.shown.length;
   $("#kill-pending").disabled = !state.queue.some((job) => job.state === "PENDING");
   $("#kill-all").disabled = !state.queue.length;
 }
@@ -587,22 +793,23 @@ function memoryCell(job) {
 }
 
 function renderHistory() {
-  const needle = $("#filter").value.trim().toLowerCase();
-  const rows = state.history.filter((job) => !needle || (job.name + " " + job.state + " " + job.state.replaceAll("_", " ") + " " + job.id).toLowerCase().includes(needle));
+  const rows = state.history.filter((job) => wanted("history", job) && (state.ultra ? kept("history", job) : FITS.history(job, sought("history"))));
   const cut = state.finished > state.history.length ? ` (the ${state.history.length} most recent of ${state.finished})` : "";
   $("#history-count").textContent = (state.history.length ? `${rows.length} of ${state.history.length}${cut} · ` : "")
     + (state.read ? `accounting read at ${new Date(1000 * state.read).toLocaleTimeString()}` : "");
   $("#history-count").title = "The accounting database is read every two minutes while the tab is visible, when a job leaves the queue, and on Refresh now";
   const body = $("#history");
-  if (!rows.length) body.replaceChildren(el("tr", {}, el("td", { class: "empty", colspan: 15 }, "No finished job in this period.")));
-  else body.replaceChildren(...rows.map((job) => el("tr", { class: "pick" + (state.open === job.id ? " open" : ""), onclick: () => openJob(job.id) },
+  if (tiled()) body.replaceChildren();
+  else if (!rows.length) body.replaceChildren(el("tr", {}, el("td", { class: "empty", colspan: 15 }, "No finished job in this period.")));
+  else body.replaceChildren(...rows.slice(0, room("history")).map((job) => el("tr", { class: "pick" + (state.open === job.id ? " open" : ""), onclick: () => openJob(job.id) },
     el("td", { class: "id" }, jobLink(job.id)), el("td", { class: "name", title: job.name }, job.name), el("td", {}, job.partition),
     el("td", {}, badge(job.state), job.restarts ? badge(`restarted ×${job.restarts}`, "s-wait") : null), el("td", {}, job.exit),
     el("td", { class: "num" }, duration(job.elapsed)), el("td", { class: "num" }, job.limit ? percent(job.elapsed / job.limit) : "–"),
     memoryCell(job), el("td", { class: "num" }, percent(job.cpu_eff)), el("td", { class: "num" }, duration(job.wait)),
     el("td", {}, stamp(job.end)), el("td", {}, job.nodes), el("td", { class: "num" }, job.cpus), el("td", { class: "num" }, job.gpus || "–"),
-    el("td", { class: "num", hidden: !site().usage }, occupancy(job)))));
+    el("td", { class: "num", hidden: !site().usage }, occupancy(job)))), ...[more(rows.length - room("history"), "history", 15, renderHistory)].filter(Boolean));
   $("#occupancy-head").hidden = !site().usage;
+  renderMosaic("history");
 }
 
 // The occupancy of the GPUs of a job, from the usage service ; its colour and its word follow the thresholds of the site.
@@ -712,18 +919,40 @@ $("#usage-box").addEventListener("close", () => { $("#usage-token").value = ""; 
 window.addEventListener("pagehide", () => { $("#usage-token").value = ""; });
 
 function renderAdvice() {
-  const rows = state.advice || [], ask = (text) => text ? el("code", {}, text) : el("span", { class: "muted" }, "–");
-  $("#advice-count").textContent = rows.length ? `${rows.length} name${rows.length > 1 ? "s" : ""}, ${rows.filter((row) => row.mem || row.time || row.cores).length} with a smaller request that fits` : "";
+  // With --ultra the sizing is by name pattern, as the server groups it : a click on a pattern keeps its group alone in the mosaics.
+  const family = state.ultra && $("#queue-group").value === "family", all = state.advice || [];
+  // With --ultra, what needs a look comes first (a lack of memory or of time, then a smaller request that fits), and each use is a bar of
+  // its request : short and amber where much more is asked than used, red where the request was not enough.
+  // What the smaller requests would have given back, as the server counts it job by job : CPU-hours, and GiB-hours of memory.
+  const back = (row) => ({ cpu: row.cpu_back || 0, mem: row.mem_back || 0 });
+  const whole = all.reduce((sum, row) => ({ cpu: sum.cpu + back(row).cpu, mem: sum.mem + back(row).mem }), { cpu: 0, mem: 0 });
+  // The order : what lacked memory or time, then the largest share of what can be given back, then the rest as the server sorts it.
+  const weight = (row) => (row.oom || row.timeout ? 2 : 0) + (whole.cpu ? back(row).cpu / whole.cpu : 0) / 2 + (whole.mem ? back(row).mem / whole.mem : 0) / 2;
+  const sorted = state.ultra ? all.map((row, at) => [weight(row), at, row]).sort((one, two) => two[0] - one[0] || one[1] - two[1]).map((item) => item[2]) : all;
+  // A use as a bar of its request, with a mark at the smaller request that fits.
+  const gauge = (used, asked, short, fit, text) => (!state.ultra || !asked ? text : [el("span", { class: "meter ask" + (short ? " full" : used / asked < 0.5 ? " warn" : ""), title: text + (fit ? " ; the mark : the request suggested" : "") },
+    el("i", { style: `width:${100 * Math.min(1, used / asked)}%` }), fit ? el("b", { style: `left:${100 * Math.min(1, fit / asked)}%` }) : null), " " + percent(used / asked)]);
+  const said = (sum) => [[sum.cpu, "CPU-h"], [sum.mem, "GiB-h"]].filter(([value]) => value >= 1).map(([value, unit]) => `${Math.round(value).toLocaleString()} ${unit}`).join(", ");
+  const given = (row) => said(back(row));
+  const rows = family && state.focus != null ? sorted.filter((row) => row.name === state.focus) : sorted, ask = (text) => text ? el("code", {}, text) : el("span", { class: "muted" }, "–");
+  $("#advice-note").textContent = "From the finished jobs of the period, grouped by name" + (state.ultra ? " pattern (the name with its numbers left out : the 40 patterns with the most jobs ; first those that lacked memory or time, then those whose smaller request gives back the most ; a bar is the use against the request, its mark the request suggested)" : "")
+    + ". A suggestion is a starting point : it knows the runs of this period only, and not the GPU memory.";
+  const shown = rows.reduce((sum, row) => ({ cpu: sum.cpu + back(row).cpu, mem: sum.mem + back(row).mem }), { cpu: 0, mem: 0 });
+  $("#advice-count").textContent = rows.length ? `${rows.length} name${state.ultra ? " pattern" : ""}${rows.length > 1 ? "s" : ""}, ${rows.filter((row) => row.mem || row.time || row.cores).length} with a smaller request that fits`
+    + (state.ultra && said(shown) ? ` : they would have given back ${said(shown)} in this period` : "") : "";
   $("#advice").replaceChildren(...(rows.length ? rows.map((row) => el("tr", {},
-    el("td", { class: "name", title: row.name }, row.name), el("td", { class: "num" }, row.jobs),
-    el("td", { class: "num" }, row.mem_peak && row.mem_req ? `${bytes(row.mem_peak)} / ${bytes(row.mem_req)} · ${percent(row.mem_peak / row.mem_req)}` : "–"), el("td", {}, ask(row.mem && `--mem=${row.mem}G`)),
-    el("td", { class: "num" }, row.limit ? `${duration(row.elapsed)} / ${duration(row.limit)} · ${percent(row.elapsed / row.limit)}` : duration(row.elapsed)),
+    el("td", { class: "name", title: row.name }, state.ultra ? el("button", { class: "link plain", title: "Keep this group alone in the mosaics, or show them all again",
+      onclick: () => { if (!family) { $("#queue-group").value = "family"; state.unfolded.clear(); state.focus = null; } alone(row.name); } }, row.name) : row.name),
+    el("td", { class: "num" }, row.jobs),
+    el("td", { class: "num" }, row.mem_peak && row.mem_req ? gauge(row.mem_peak, row.mem_req, row.oom, row.mem * 2 ** 30, `${bytes(row.mem_peak)} / ${bytes(row.mem_req)} · ${percent(row.mem_peak / row.mem_req)}`) : "–"), el("td", {}, ask(row.mem && `--mem=${row.mem}G`)),
+    el("td", { class: "num" }, row.limit ? gauge(row.elapsed, row.limit, row.timeout, row.time * 60, `${duration(row.elapsed)} / ${duration(row.limit)} · ${percent(row.elapsed / row.limit)}`) : duration(row.elapsed)),
     el("td", {}, ask(row.time && `--time=${Math.floor(row.time / 60)}:${two(row.time % 60)}:00`)),
-    el("td", { class: "num" }, row.cpu_used != null ? `${amount(row.cpu_used)} / ${row.cpus}` : "–"), el("td", {}, ask(row.cores && `--cpus-per-task=${row.cores}`)),
-    el("td", { class: "wrap" }, row.oom ? badge(`${row.oom} out of memory : ask for more`, "s-fail") : null, row.timeout ? badge(`${row.timeout} timed out : ask for more time`, "s-fail") : null,
+    el("td", { class: "num" }, row.cpu_used != null ? gauge(row.cpu_used, row.cpus, false, row.cores, `${amount(row.cpu_used)} / ${row.cpus}`) : "–"), el("td", {}, ask(row.cores && `--cpus-per-task=${row.cores}`)),
+    el("td", { class: "wrap" }, state.ultra && given(row) ? el("span", { title: "What the jobs of this pattern held above the requests suggested, over the part of their runs inside the period" }, `gives back ${given(row)} `) : null,
+      row.oom ? badge(`${row.oom} out of memory : ask for more`, "s-fail") : null, row.timeout ? badge(`${row.timeout} timed out : ask for more time`, "s-fail") : null,
       row.tasks > 1 ? el("span", { class: "muted", title: "The accounting records the memory peak of the largest task of a step, not of the job" }, `steps of ${row.tasks} tasks : no advice on memory nor CPUs `) : null,
       row.completed < row.jobs && !row.oom && !row.timeout ? el("span", { class: "muted" }, `${row.completed} of ${row.jobs} completed`) : null)))
-    : [el("tr", {}, el("td", { class: "empty", colspan: 9 }, "No completed job in this period."))]));
+    : [el("tr", {}, el("td", { class: "empty", colspan: 9 }, all.length ? "No completed job of this group among the patterns with the most jobs." : "No completed job in this period."))]));
 }
 
 function renderSummary() {
@@ -792,13 +1021,21 @@ async function refresh(manual) {
   try {
     const enrolled = state.enrolled, paced = state.paced;
     const status = await api("/api/status");
-    state.host = status.host; state.writable = status.writable; state.actions = status.actions === true; state.site = { ...SITE, ...(status.site || state.site) };
+    state.host = status.host; state.writable = status.writable; state.actions = status.actions === true;
+    state.ultra = status.ultra === true; state.files = status.files !== false;
+    $("#queue-filter").hidden = $("#queue-group").hidden = $("#ultra-view").hidden = !state.ultra;
+    // Without the files (--no-files) the Storage view is not there.
+    $("#views [data-view=storage]").hidden = !state.files;
+    if (!state.files && state.view === "storage") $("#views [data-view=jobs]").click(); state.site = { ...SITE, ...(status.site || state.site) };
     state.sharing = status.connected ? "" : String(status.sharing || "");
     if (!state.pacing && paced === state.paced) { state.sample = status.sample || 0; showPace(); }
     if (!state.enrolling && enrolled === state.enrolled) state.token = Boolean(status.enrolled);
-    $("#version").textContent = status.version ? "v" + status.version : ""; syncFiles(); renderLinks(); showUsage();
+    $("#version").textContent = (status.version ? "v" + status.version : "") + (state.ultra ? " · ultra" : ""); syncFiles(); renderLinks(); showUsage();
     if (!status.connected) throw Object.assign(new Error("not connected"), { status: 503 });
-    const data = await api("/api/jobs", { days: $("#days").value, fresh: Boolean(manual), quiet: document.hidden });
+    // The finished jobs are sent when the accounting was read again, not at each refresh : `since` says which reading the page holds.
+    const data = await api("/api/jobs", { days: $("#days").value, fresh: Boolean(manual), quiet: document.hidden,
+      since: state.period === $("#days").value && state.read != null ? state.read : undefined });
+    if (!data.history) { data.history = state.history; data.advice = state.advice; }
     state.queue = data.queue; state.history = data.history; state.finished = data.finished || data.history.length;
     // A queue that could not be read is not an empty queue : nothing is compared with it.
     const before = state.known, listed = data.listed !== false;
@@ -825,9 +1062,9 @@ async function refresh(manual) {
 
 const LABELS = { cancel: "Kill", term: "Send SIGTERM to", requeue: "Requeue", hold: "Hold", release: "Release" };
 
-async function send(action, id) {
+async function send(action, id, ids) {
   try {
-    const result = await api("/api/action", { action, id });
+    const result = await api("/api/action", { action, id, ids });
     toast(result.ok ? `Done : ${result.command}` : `Failed : ${result.output || result.command}`);
     return result.ok;
   } catch (error) { fail(error); return false; }
@@ -840,10 +1077,16 @@ async function act(action, job) {
 }
 
 $("#kill-selected").onclick = async () => {
-  const ids = [...state.picked];
-  if (!ids.length || !confirm(`Kill ${ids.length} selected job(s) ?\n${ids.join(", ")}`)) return;
-  for (const id of ids) await send("cancel", id);
-  state.picked.clear(); setTimeout(soon, 800);
+  const shown = tiled(), ids = shown ? state.kept.map((job) => job.id) : [...state.picked];
+  if (!ids.length || !confirm((shown ? `Kill what the mosaic of the queue shows : ${ids.length} line(s), ${ids.reduce((total, id) => total + tasks(id), 0)} job(s) or task(s) ?` : `Kill ${ids.length} selected job(s) ?`)
+    + `\n${ids.slice(0, 40).join(", ")}` + (ids.length > 40 ? ` … and ${ids.length - 40} more` : ""))) return;
+  // One scancel for the selection (1000 jobs at most in each ; each is sent, whatever the one before answered : a job that ended
+  // meanwhile makes scancel fail for it alone) ; the selection is kept when one failed.
+  let done = true;
+  for (let at = 0; at < ids.length; at += 1000) done = await send("cancel_many", null, ids.slice(at, at + 1000)) && done;
+  if (!done) toast("One of the scancel commands failed : look at the queue before repeating it");
+  if (done) state.picked.clear();
+  setTimeout(soon, 800);
 };
 $("#kill-pending").onclick = async () => {
   if (!confirm("Kill every pending job of this account ?")) return;
@@ -854,7 +1097,7 @@ $("#kill-all").onclick = async () => {
   await send("cancel_all"); setTimeout(soon, 800);
 };
 $("#pick-all").onclick = (event) => {
-  state.picked = new Set(event.target.checked ? shownJobs().map((job) => job.id) : []); renderQueue();
+  state.picked = new Set(event.target.checked ? state.shown.map((job) => job.id) : []); renderQueue();
 };
 
 /* ---------- side panels ---------- */
@@ -881,7 +1124,7 @@ function showHead() {
   if (!state.actions) buttons.push(el("span", { class: "muted" }, "Job actions are disabled (start the server with --actions)."));
   else if (queued) {
     buttons.push(el("button", { class: "danger", onclick: () => act("cancel", job) }, "Kill"));
-    if (job.state === "RUNNING") buttons.push(el("button", { title: "scancel --signal=TERM : lets the job save its state and be requeued", onclick: () => act("term", job) }, "Send SIGTERM"));
+    if (job.state === "RUNNING") buttons.push(el("button", { title: "scancel --signal=TERM : the signal goes to the steps the job started with srun, which can save their state ; a program the batch script runs itself does not receive it", onclick: () => act("term", job) }, "Send SIGTERM"));
     if (job.state === "PENDING") buttons.push(el("button", { onclick: () => act("hold", job) }, "Hold"), el("button", { onclick: () => act("release", job) }, "Release"));
   }
   if (state.actions) buttons.push(el("button", { title: "scontrol requeue : running, pending or recently finished batch jobs only", onclick: () => act("requeue", job) }, "Requeue"));
@@ -926,11 +1169,11 @@ async function loadTab(quiet) {
   $("#d-lines").hidden = tab === "metric";
   if (!quiet) body.replaceChildren(el("p", { class: "muted" }, "Loading"));
   try {
-    let content;
+    let content, path = null;
     const job = findJob(id);
     if (tab === "output") {
       const out = await api("/api/output", { id, stream: $("#d-stream").value, lines: $("#d-lines").value });
-      $("#d-path").textContent = out.path;
+      path = out.path;
       content = out.missing ? [el("p", { class: "muted" }, out.missing)] : [el("pre", {}, out.text || "(empty file)")];
     } else if (tab === "info") {
       const info = await api("/api/job", { id });
@@ -947,7 +1190,7 @@ async function loadTab(quiet) {
         el("h2", { style: "margin:14px 0 8px" }, "Live (running steps)"), grid(info.live, "No running step.")];
     } else if (tab === "metric") {
       const out = await api("/api/output", { id, stream: $("#d-stream").value, lines: 2000 });
-      $("#d-path").textContent = out.path;
+      path = out.path;
       content = out.missing ? [el("p", { class: "muted" }, out.missing)] : await metric(out.text);
     } else if (job?.state !== "RUNNING") {
       content = [el("p", { class: "muted" }, "GPU status is available for running jobs only.")];
@@ -963,6 +1206,7 @@ async function loadTab(quiet) {
             el("code", {}, sited(command, { node, host: state.host })), /^[.,;]/.test(after) ? "" : " ", sited(after, { node, host: state.host })))];
     }
     if (state.open !== id || state.tab !== tab) return;
+    if (path != null) $("#d-path").textContent = path;
     const atEnd = body.scrollTop + body.clientHeight >= body.scrollHeight - 30;
     body.replaceChildren(...content.filter((node) => node != null));
     if (tab === "output" && (!quiet || atEnd)) body.scrollTop = body.scrollHeight;
@@ -985,7 +1229,7 @@ const MATCHER = `onmessage = (event) => {
   const values = [], number = /^[-+]?(\\d+\\.?\\d*|\\.\\d+)(e[-+]?\\d+)?$/i;
   for (const match of event.data.text.matchAll(new RegExp(event.data.source, "gi"))) {
     const found = match[1] ?? match[0];
-    if (number.test(found)) values.push(Number(found));
+    if (number.test(found) && Number.isFinite(Number(found))) values.push(Number(found));
     if (values.length >= 5000) break;
   }
   postMessage(values);
@@ -1164,6 +1408,8 @@ async function findUnused(days) {
 $("#unused").onclick = () => findUnused($("#unused-days").value);
 
 async function openFile(path) {
+  // The area that holds the file is the one of the directory it was opened from, which may not be the one shown when it is deleted.
+  if (path !== state.file) state.held = state.dir ? state.dir.place : "";
   state.file = path; state.open = null; side("preview");
   $("#p-title").textContent = path.split("/").pop(); $("#p-path").textContent = path; $("#p-size").textContent = "";
   const body = $("#p-body");
@@ -1214,7 +1460,7 @@ async function removeEntries(paths) {
     } catch (error) { text += "\nEverything it contains is deleted."; }
   } else if (folders.length) text += `\n${folders.length} of them ${folders.length > 1 ? "are directories" : "is a directory"} : everything inside is deleted too.`;
   // The area that really holds the files, not the one they were reached from : a link of the home directory may lead where nothing is backed up.
-  const place = state.dir ? state.dir.place : "";
+  const place = paths.length === 1 && paths[0] === state.file ? state.held : state.dir ? state.dir.place : "";
   text += "\n\n" + (site().backup[place] || `These files are in ${place ? "$" + place : "an area"}, for which no backup is known : a deletion cannot be undone.`);
   if (folders.length) {
     if ((prompt(text + "\n\nType delete to confirm.") || "").trim().toLowerCase() !== "delete") return;
@@ -1620,7 +1866,7 @@ function touch() {
   state.touched = Date.now();
   if (state.paused) { state.paused = false; refresh(); }
 }
-for (const name of ["pointerdown", "keydown"]) document.addEventListener(name, touch, true);
+for (const name of ["pointerdown", "keydown", "wheel"]) document.addEventListener(name, touch, { capture: true, passive: true });
 
 function schedule() {
   clearInterval(state.timer);
@@ -1639,6 +1885,8 @@ $("#interval").onchange = schedule;
 $("#refresh").onclick = () => refresh(true);
 $("#days").onchange = () => { if (Number($("#res-range").value) > 0) $("#res-range").value = $("#days").value; soon(); };
 $("#filter").oninput = renderHistory;
+$("#queue-filter").oninput = renderQueue;
+$("#queue-group").onchange = () => { state.unfolded.clear(); state.focus = null; renderQueue(); renderHistory(); renderAdvice(); };
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
   if (state.paused) touch(); else if (Number($("#interval").value)) { state.touched = Date.now(); refresh(); }

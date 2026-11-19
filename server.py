@@ -12,6 +12,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import statistics
 import subprocess
@@ -27,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 # The date of what was never read. The clock of `time.monotonic` starts anywhere, near zero in a new process on some
 # systems (seen on macOS) : no fixed number is old for it, and a kept answer is used only when there is one.
 NEVER = float("-inf")
@@ -299,7 +300,19 @@ class Cluster:
     Every command is short (Slurm queries, one directory level, a bounded tail) : the login nodes are entry
     points only. The two walks of a directory tree (`measure`, `unused`) are stopped after `WALK` seconds."""
 
-    JOB_ID = re.compile(r"[0-9]+(\+[0-9]+|_([0-9]+|\[[0-9,%-]+\]))?")
+    JOB_ID = re.compile(r"[0-9]+(\+[0-9]+|_([0-9]+|\[[0-9,:%-]+\]))?")
+    # The limit of tasks running at once that squeue prints in the identifier of a pending array (`123_[3-10%2]`) : an option of
+    # the submission, not a part of the tasks to act on — the commands are given `123_[3-10]`, the form their manual has.
+    THROTTLE = re.compile(r"%[0-9]+(?=\])")
+    # What is left once the limit is removed : a job, a task, or tasks as numbers, ranges and steps — nothing else is sent to a command.
+    TASKS = re.compile(r"[0-9]+(\+[0-9]+|_([0-9]+|\[[0-9]+(-[0-9]+(:[0-9]+)?)?(,[0-9]+(-[0-9]+(:[0-9]+)?)?)*\]))?")
+    # The characters of an identifier at most : the whole list of the pending tasks of an array (`SLURM_BITSTR_LEN=0`) may be long.
+    LONGEST = 16384
+    # The settings of Slurm that the account may export on the cluster (`SQUEUE_STATES`, `SCANCEL_NAME`, `SLURM_CLUSTERS`… : the
+    # ENVIRONMENT VARIABLES of each manual) would filter or reshape what the commands list and act on : none is kept, the
+    # commands are run as written here.
+    PLAIN = ('command unset "${!SQUEUE_@}" "${!SACCT_@}" "${!SCANCEL_@}" "${!SINFO_@}" "${!SCONTROL_@}" "${!SSTAT_@}" SLURM_CLUSTERS SLURM_STEP_GRES SLURM_GRES '
+             "SLURM_OVERLAP SLURM_TIME_FORMAT SLURM_BITSTR_LEN 2>/dev/null || :; ")
     ANSI = re.compile(r"\x1b\[[0-9;]*m")
     UNITS = {"": 1, "K": 2**10, "M": 2**20, "G": 2**30, "T": 2**40, "P": 2**50}
     QUEUE = ("id", "partition", "state", "elapsed", "limit", "left", "start", "cpus", "mem", "gres", "priority", "where", "name")
@@ -309,14 +322,21 @@ class Cluster:
     SACCT = "JobID,Partition,State,ExitCode,ElapsedRaw,TimelimitRaw,Submit,Start,End,NodeList,AllocTRES,ReqMem,MaxRSS,TotalCPU,Restarts,NTasks,JobName"
     EPOCH = "SLURM_TIME_FORMAT=%s "
     LISTED_JOBS = 300
+    # `--ultra`, for an account of hundreds to thousands of jobs : the finished jobs listed, the seconds given to the accounting to
+    # answer, and those a reading of it must be old before a job that left the queue asks for another one (`jobs`).
+    ULTRA = {"listed": 5000, "patience": 90, "settle": 60}
+    MANY = 1000
     OUTPUT = 400_000
-    STEPS = "JobID,JobName,State,ExitCode,Elapsed,TotalCPU,ReqMem,MaxRSS,AllocTRES,ElapsedRaw,TimelimitRaw"
+    # The name of the job is the last column : it may hold the separator (`info`).
+    STEPS = "JobID,State,ExitCode,Elapsed,TotalCPU,ReqMem,MaxRSS,AllocTRES,ElapsedRaw,TimelimitRaw,JobName"
     RECAP = ("JobID,JobName,State,ExitCode,DerivedExitCode,Reason,Partition,QOS,Account,Submit,Start,End,Elapsed,Timelimit,"
              "Planned,NodeList,ReqTRES,AllocTRES,ReqMem,Restarts,WorkDir,StdOut,StdErr,SubmitLine")
     DAYS = (1, 3, 7, 30)
     WALK = 8
     PARALLEL = 2
     HISTORY = 120
+    # The seconds an accounting that failed is left alone before it is asked again (a database that is down answers no faster).
+    RETRY = 30
     STATES = "CANCELLED,COMPLETED,FAILED,TIMEOUT,OUT_OF_MEMORY,NODE_FAIL,PREEMPTED,BOOT_FAIL,DEADLINE,RUNNING,REQUEUED,SUSPENDED"
     DOWNLOAD = 100 * 2**20
     PROTECTED = (".ssh", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".bash_aliases", ".profile", ".login", ".logout",
@@ -326,7 +346,9 @@ class Cluster:
                ".password-store", ".local/share/keyrings", ".cache/huggingface/token", ".cache/huggingface/stored_tokens", ".huggingface/token",
                ".kaggle", ".config/kaggle", ".config/wandb", ".cargo/credentials", ".cargo/credentials.toml", ".config/pypoetry/auth.toml", ".gem/credentials",
                ".oci", ".local/share/jupyter/runtime", ".bash_history", ".zsh_history", ".python_history", ".claude/.credentials.json", ".codex/auth.json",
-               ".config/github-copilot", ".comet.config", ".terraform.d/credentials.tfrc.json")
+               ".config/github-copilot", ".comet.config", ".terraform.d/credentials.tfrc.json", ".config/containers/auth.json",
+               ".apptainer/remote.yaml", ".singularity/remote.yaml", ".subversion/auth", ".Xauthority", ".local/share/fish/fish_history",
+               ".psql_history", ".mysql_history", ".sqlite_history", ".ipython/profile_default/history.sqlite")
     SHIELD = (
         'home=$(realpath -e -- "$HOME" 2>/dev/null) || exit 4; hidden=(); links=(); rooms=(); '
         'trail() { local at=$1 rest=$2 part target hops=0; found=(); '
@@ -366,10 +388,11 @@ class Cluster:
         'home=$(realpath -e -- "$HOME"); guard=(); '
         'for name in "${keep[@]}"; do guard+=("$home/$name" "$(realpath -m -- "$home/$name")"); done; '
         'vault=("$home/.ssh" "$(realpath -m -- "$home/.ssh")"); seen=; parent=; '
-        'within() { local root; for root in "${areas[@]}"; do [ "$1" = "$root" ] && return 0; case "$1" in "$root"/*) return 0;; esac; done; return 1; }; '
+        'within() { local root deep=; for root in "${areas[@]}"; do case "$1/" in "$root"/*) [ "${#root}" -gt "${#deep}" ] && deep=$root;; esac; done; '
+        '[ -n "$deep" ] || return 1; for root in "${shut[@]}"; do case "$1/" in "$root"/*) [ "${#root}" -gt "${#deep}" ] && return 1;; esac; done; return 0; }; '
         'locate() { local dir=${1%/*}; dir=${dir:-/}; [ "$dir" = "$seen" ] && return 0; seen=$dir; '
         'parent=$(realpath -e -- "$dir" 2>/dev/null) || parent=; }; '
-        'protected() { local item; for item in "${guard[@]}" "${areas[@]}"; do [ "$1" = "$item" ] && return 0; '
+        'protected() { local item; for item in "${guard[@]}" "${areas[@]}" "${shut[@]}"; do [ "$1" = "$item" ] && return 0; '
         'case "$item" in "$1"/*) return 0;; esac; done; '
         'for item in "${vault[@]}"; do case "$1" in "$item"/*) return 0;; esac; done; return 1; }; '
         'refuse() { if [ "$SECONDS" -ge "$budget" ]; then '
@@ -422,12 +445,17 @@ class Cluster:
     PREVIEW = 256 * 1024
     ACTIONS = {
         "cancel": 'scancel "$1"',
+        # To the steps started by srun only : scancel(1) sends a signal other than KILL neither to the batch script nor to what it
+        # runs itself. `--full` would, and a batch shell without a trap dies of it at once, the job with it, before any program saved its state.
         "term": 'scancel --signal=TERM "$1"',
         "requeue": 'scontrol requeue "$1"',
         "hold": 'scontrol hold "$1"',
         "release": 'scontrol release "$1"',
         "cancel_pending": "scancel --me -t PENDING",
         "cancel_all": "scancel --me",
+        # One request to the controller for the whole list (`--ctld`, as scancel(1) recommends), a job that ended meanwhile not
+        # being an error (`-Q`).
+        "cancel_many": 'scancel --ctld -Q "$@"',
     }
     PATTERN = re.compile(r"%(\d*)([jAaxuN%])")
     UNEXPANDED = re.compile(r"%\d*[A-Za-z]")
@@ -442,8 +470,12 @@ class Cluster:
     WINDOW = 180
     SPAN = 90
     ADVISED = 40
+    # What `--ultra` leaves out of a name to group the jobs of a sweep (`run-3-lr0.1` and `run-4-lr0.01` are `run-#-lr#`) : as the page does.
+    NUMBERS = re.compile(r"[0-9]+(\.[0-9]+)?")
     PACE = (30, 3600)
-    GPU_ROW = re.compile(r"\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*")
+    CHECKED = 2
+    TURN = 20
+    GPU_ROW = re.compile(r"\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*")
     # The bytes of the path of a socket (`sun_path`) : 108 on Linux, 104 on macOS and the BSDs. ssh first binds the socket
     # of a shared connection under its `ControlPath` followed by a dot and `SUFFIX` characters, and the name ends with a zero.
     SUN_PATH = 108 if sys.platform.startswith("linux") else 104
@@ -466,8 +498,13 @@ class Cluster:
         "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits & done; wait"
     )
 
-    def __init__(self, host, extra_roots=(), writable=False, actions=False, sample=0, keep=None, site=None):
+    def __init__(self, host, extra_roots=(), writable=False, actions=False, sample=0, keep=None, site=None, ultra=False, files=True):
         self.host = host
+        self.ultra = ultra
+        self.browse = files
+        self.listed, self.patience, self.settle = (self.ULTRA[key] for key in ("listed", "patience", "settle")) if ultra else (self.LISTED_JOBS, 25, 0)
+        self.checked = NEVER
+        self.muted = False
         self.site = site or Site()
         self.sample = sample
         self.pace = threading.Condition()
@@ -481,6 +518,9 @@ class Cluster:
         self.SEP = f"@@@{secrets.token_hex(6)}@@@"
         self.cache = {}
         self.accounts = {}
+        self.fault = {}
+        self.outdated = set()
+        self.departed = NEVER
         self.queued = set()
         self.outputs = {}
         self.known_roots = None
@@ -499,11 +539,13 @@ class Cluster:
     ##### Connection #####
 
     def connected(self):
-        """True when the SSH master connection of the alias is alive (no network traffic)."""
+        """True when the SSH master connection of the alias is alive (no network traffic). The moment of a yes is kept
+        (`checked`) : a command sent within `CHECKED` seconds of it does not start a process to ask again (`send`)."""
         try:
             check = subprocess.run(["ssh", *self.CLIENT, "-O", "check", self.host], capture_output=True, timeout=5)
         except (subprocess.TimeoutExpired, OSError):
             return False
+        self.checked = time.monotonic() if check.returncode == 0 else NEVER
         return check.returncode == 0
 
     @classmethod
@@ -563,12 +605,14 @@ class Cluster:
         connection, what the SSH settings lack to keep one (`sharing`), '' with one."""
         connected = self.connected()
         return {"connected": connected, "host": self.host, "writable": self.writable, "actions": self.actions, "version": VERSION,
-                "sample": self.sample, "enrolled": self.site.enrolled(), "site": self.site.describe(),
+                "ultra": self.ultra, "files": self.browse, "sample": self.sample, "enrolled": self.site.enrolled(), "site": self.site.describe(),
                 "sharing": "" if connected else self.sharing()}
 
     def send(self, script, timeout):
-        """One attempt to run a script on the login node : exit code, output and error output, as bytes."""
-        if not self.connected():
+        """One attempt to run a script on the login node : exit code, output and error output, as bytes. The connection is
+        checked first, unless it just was (`connected`) : the status and the commands of one refresh ask once. A connection
+        that closed since makes ssh fail on this computer (255), and `run` then asks again."""
+        if time.monotonic() - self.checked >= self.CHECKED and not self.connected():
             raise NotConnected
         proc = subprocess.run(
             ["ssh", *self.CLIENT, "-o", "ConnectTimeout=10", self.host, f"timeout {timeout} bash -s"],
@@ -581,37 +625,61 @@ class Cluster:
         if the master connection died, ssh fails locally instead of sending a failed login.
 
         A connection carries about ten commands at once and refuses the next ones (ssh then exits with 255
-        and an empty output) : at most `PARALLEL` run together, and a refused one is tried again. ssh also exits
+        and an empty output) : at most `PARALLEL` run together, and a refused one is tried again, after a wait
+        during which it holds none of these places. ssh also exits
         with 255 when the connection drops in the middle of a command : a command that already answered is
         never sent again, and neither is one that changes something (`once`), which then returns what it
-        printed with the code 255.
+        printed with the code 255 — or, when it printed nothing, is said to have run or not (`Busy`, with that message).
 
         The script and its `args` (positional parameters `$1`, `$@`) travel on the standard input of a remote
-        `bash -s` : the paths and job ids are not in a command line that `ps` shows to the other users of the
-        node, and no value coming from the page is ever written in the text of a script. The remote `timeout` ends the script before
+        `bash -s` : the paths and job ids are not in the command line of that shell, and no value coming from the page
+        is ever written in the text of a script. The commands the script itself starts (`realpath`, `rm`, `mv`, `scontrol`,
+        `srun`) take them as arguments : `ps` shows those to the other users of the node for the instant each one lasts. The remote `timeout` ends the script before
         the local one gives up, so no command is left running on the cluster. `raw` returns the output as bytes."""
-        script = "set -- " + " ".join(shlex.quote(arg) for arg in args) + "\n{ " + command + "\n} </dev/null\n"
-        with self.slots:
-            for attempt in range(3):
+        script = "set -- " + " ".join(shlex.quote(arg) for arg in args) + "\n{ " + self.PLAIN + command + "\n} </dev/null\n"
+        for attempt in range(3):
+            with self.slots:
                 code, out, err = self.send(script, timeout)
-                if code != 255 or out or once:
-                    break
+            if code != 255 or out or once:
+                break
+            self.checked = NEVER
+            if attempt < 2:
                 time.sleep(1 + attempt)
         if code == 255 and not (once and out):
-            raise Busy
+            raise Busy("the SSH connection refused the command, or dropped while it ran : it was not sent again, and may have been done or not ; "
+                       "look before repeating it" if once else "")
         if code == 124:
             raise subprocess.TimeoutExpired("remote command", timeout)
         err = self.ANSI.sub("", err.decode("utf-8", "replace")).strip()
         return code, out if raw else out.decode("utf-8", "replace"), err
 
+    def heavy(self, *args, **options):
+        """`run` for a command that may last (a walk of a directory tree, a download) : one at a time, so that a place stays
+        free for the short commands of the page ; one that waited `TURN` seconds for its turn is refused (`Busy`)."""
+        if not self.long.acquire(timeout=self.TURN):
+            raise Busy("a long command (a download, a measure, a search) is already running on the cluster ; try again when it has ended")
+        try:
+            return self.run(*args, **options)
+        finally:
+            self.long.release()
+
     ##### Parsing #####
 
     @classmethod
     def job_id(cls, value):
-        """A validated job identifier (`123`, `123_4` or `123_[1-9]`) ; the only job input sent to the shell."""
-        if not isinstance(value, str) or not cls.JOB_ID.fullmatch(value):
+        """A validated job identifier (`123`, `123_4`, `123_[1-9]`, `123+0`) ; the only job input sent to the shell."""
+        if not isinstance(value, str) or len(value) > cls.LONGEST or not cls.JOB_ID.fullmatch(value):
             raise ValueError("invalid job id")
         return value
+
+    @classmethod
+    def target(cls, value):
+        """The identifier a job action is given : the validated one, without the limit of tasks at once that squeue prints with a
+        pending array (`123_[3-10%2]` : `123_[3-10]`) ; refused when what is left is not a job, a task or a plain list of tasks."""
+        found = cls.THROTTLE.sub("", cls.job_id(value))
+        if not cls.TASKS.fullmatch(found):
+            raise ValueError("invalid job id")
+        return found
 
     @staticmethod
     def rows(text, columns):
@@ -624,12 +692,12 @@ class Cluster:
         return out
 
     @staticmethod
-    def table(text, separator="|"):
-        """A text table with a header line as `{columns, rows}`."""
+    def table(text, separator="|", most=-1):
+        """A text table with a header line as `{columns, rows}` ; with `most` columns, the last one may hold the separator."""
         lines = [line for line in text.splitlines() if line.strip()]
         if not lines:
             return {"columns": [], "rows": []}
-        split = [[cell.strip() for cell in line.split(separator)] for line in lines]
+        split = [[cell.strip() for cell in line.split(separator, most - 1)] for line in lines]
         return {"columns": split[0], "rows": split[1:]}
 
     @classmethod
@@ -709,21 +777,42 @@ class Cluster:
 
         `squeue` runs at every call ; `sacct`, a query of the accounting database, only when asked (`fresh`),
         when a job has left the queue, after an action, or when its last answer is older than `HISTORY` seconds —
-        this last case not for a `quiet` caller (a hidden tab, which only keeps the mark of its name up to date)."""
+        this last case not for a `quiet` caller (a hidden tab, which only keeps the mark of its name up to date).
+        A job that left the queue outdates the accounting of every period, not only the one asked. With `--ultra`
+        (`settle`), where a job leaves at almost every refresh, it asks for a new reading only once the last one is
+        `settle` seconds old, for each period. A queue that could not be read says nothing of the jobs that left, and an accounting
+        that failed — an error of `sacct`, or no answer in its time — is not kept : its error is given with the queue and with the finished jobs kept
+        before, if any, which it outdates, and the accounting is asked again after `RETRY` seconds, or at once by a `fresh` call."""
         days = days if days in self.DAYS else 1
         with self.lock:
             changes = self.changes
             stamp, value = self.cache.get(days, (NEVER, None))
             if not fresh and value is not None and time.monotonic() - stamp < 4:
                 return value
-        code, out, err = self.run(f"{self.EPOCH}squeue --me -h -o '{self.SQUEUE}'")
+        # `SLURM_BITSTR_LEN=0` : the list of the pending tasks of an array whole, where squeue cuts it at 64 bytes by default
+        # (squeue(1)) — a cut identifier is one the job actions would refuse.
+        code, out, err = self.run(f"SLURM_BITSTR_LEN=0 {self.EPOCH}squeue --me -h -o '{self.SQUEUE}'")
         queue = self.rows(out, self.QUEUE)
         ids = {job["id"] for job in queue}
         with self.lock:
-            left = bool(self.queued - ids)
-            self.queued = ids
             read, account = self.accounts.get(days, (NEVER, None))
-        if fresh or left or account is None or (not quiet and time.monotonic() - read > self.HISTORY):
+            failed, failure = self.fault.get(days, (NEVER, None))
+            if code == 0:
+                # A job that left outdates the reading kept for every period ; each is read again when it is next asked for,
+                # and old enough (`settle`).
+                if self.queued - ids:
+                    self.outdated.update(self.accounts, (days,))
+                    self.departed = time.monotonic()
+                self.queued = ids
+            left = days in self.outdated and time.monotonic() - read >= self.settle
+            if left:
+                self.outdated.discard(days)
+            # A hidden tab leaves an accounting that fails alone for as long as it would a good one.
+            rest = self.HISTORY if quiet else self.RETRY
+        if not fresh and time.monotonic() - failed < rest:
+            # The accounting just failed : what was kept before, if anything, with what it said.
+            account = {**(account or failure), "error": failure["error"]}
+        elif fresh or left or account is None or read == NEVER or (not quiet and time.monotonic() - read > self.HISTORY):
             # One reading of the accounting at a time. A call that waited for another one takes its answer when it
             # only wanted a recent one ; a call that needs a new one (`fresh`, a job that left the queue) takes it
             # only if that reading began after the call. An answer is not kept once an action changed the jobs.
@@ -732,19 +821,44 @@ class Cluster:
                 with self.lock:
                     latest, known = self.accounts.get(days, (NEVER, None))
                     begun = self.begun.get(days, NEVER)
-                if known is not None and (begun >= asked if fresh or left else latest > read):
+                    failed, failure = self.fault.get(days, (NEVER, None))
+                if not fresh and time.monotonic() - failed < rest:
+                    # It failed for the call this one waited for : not asked again at once.
+                    account = {**(known or failure), "error": failure["error"]}
+                elif known is not None and (begun >= asked if fresh or left else latest > read):
                     account = known
                 else:
-                    begin = time.monotonic()
-                    account = self.account(days)
-                    with self.lock:
-                        if self.changes == changes:
-                            self.accounts[days], self.begun[days] = (time.monotonic(), account), begin
+                    begin, new = time.monotonic(), None
+                    try:
+                        new = account = self.account(days)
+                    finally:
+                        with self.lock:
+                            if new is not None and not new["error"]:
+                                self.fault.pop(days, None)
+                                if self.changes == changes:
+                                    self.accounts[days], self.begun[days] = (time.monotonic(), new), begin
+                                    # A job that left while this reading was made, seen by any call, leaves it out of date ; one
+                                    # begun after the last job left is up to date.
+                                    (self.outdated.add if self.departed > begin else self.outdated.discard)(days)
+                            else:
+                                # What was kept before is out of date (the job that left is not in it), and still the best there is to show.
+                                if days in self.accounts:
+                                    self.accounts[days] = (NEVER, self.accounts[days][1])
+                                if new is not None:
+                                    self.fault[days] = (time.monotonic(), new)
+                    if new["error"] and known is not None:
+                        account = {**known, "error": new["error"]}
         value = {"queue": queue, "listed": code == 0, **account, "error": err if code else account["error"]}
         with self.lock:
             if self.changes == changes:
                 self.cache[days] = (time.monotonic(), value)
         return value
+
+    @staticmethod
+    def brief(data, since):
+        """The answer of `jobs` for a page that holds the reading of the accounting made at `since` : without the finished jobs
+        and what is drawn from them when that reading is still the one in use — they are sent when they change, not at each refresh."""
+        return {**data, "history": None, "advice": None, "timeline": None} if since is not None and since == data["read"] else data
 
     def account(self, days):
         """The finished jobs of the period with what they used, and the totals, from the accounting database.
@@ -753,7 +867,11 @@ class Cluster:
         became eligible, and a job cancelled while held would be missing. The dates are asked in seconds since
         the epoch, so the page shows them in its own time zone. `sacct` gives the whole run of a job that started
         before the period : the GPU-hours and CPU-hours count only the part of each run inside it."""
-        code, out, err = self.run(f"{self.EPOCH}sacct -P -n --start=now-{days}days --end=now --state={self.STATES} -o {self.SACCT}")
+        try:
+            code, out, err = self.run(f"{self.EPOCH}sacct -P -n --start=now-{days}days --end=now --state={self.STATES} -o {self.SACCT}", timeout=self.patience)
+        except subprocess.TimeoutExpired:
+            # The queue is still worth showing (`jobs`).
+            code, out, err = 124, "", "the accounting database did not answer in time"
         records = self.rows(out, self.RECORD)
         now = time.time()
         peaks, tasks = {}, {}
@@ -774,7 +892,7 @@ class Cluster:
             inside = job["elapsed"] if job["start"] is None else min(job["end"] or now, now) - max(job["start"], now - 86400 * days)
             job["counted"] = max(0, min(job["elapsed"], inside))
             jobs.append(job)
-        history = sorted((job for job in jobs if job["state"] not in ("RUNNING", "PENDING", "REQUEUED", "SUSPENDED")),
+        history = sorted((job for job in jobs if job["state"] not in ("RUNNING", "PENDING", "REQUEUED", "SUSPENDED", "RESIZING")),
                          key=lambda job: job["end"] or job["start"] or job["submit"] or 0, reverse=True)
         waits = [job["wait"] for job in jobs if job["wait"] is not None]
         states = {}
@@ -787,28 +905,32 @@ class Cluster:
             "wait_median": statistics.median(waits) if waits else None,
             "restarts": sum(job["restarts"] for job in jobs),
         }
-        return {"history": history[:self.LISTED_JOBS], "finished": len(history), "summary": summary, "read": now,
-                "timeline": self.timeline(jobs, days, now), "advice": self.advice(history), "waits": self.waits(jobs),
-                "error": err if code else ""}
+        return {"history": history[:self.listed], "finished": len(history), "summary": summary, "read": now,
+                "timeline": self.timeline(jobs, days, now), "advice": self.advice(history, self.ultra), "waits": self.waits(jobs),
+                "error": (err or f"sacct ended with the code {code}") if code else ""}
 
     def info(self, job):
         """The accounting record of a job, its steps, its use of the request, and `scontrol show job` while known."""
         job = self.job_id(job).split("_[")[0]
         _, out, _ = self.run(
             f"scontrol show job \"$1\" 2>&1; echo '{self.SEP}'; sacct -P -j \"$1\" -o {self.STEPS}; echo '{self.SEP}'; "
-            f"sstat -a -P -j \"$1\" -o JobID,MaxRSS,AveCPU,NTasks 2>/dev/null; echo '{self.SEP}'; "
+            # sstat does not know the tasks of an array by `123_4` (job_array.html) : it is given the identifier of the job itself.
+            "raw=$1; case \"$1\" in *_*) raw=$(squeue -h -j \"$1\" -o %A 2>/dev/null | head -n 1); case \"$raw\" in ''|*[!0-9]*) raw=$1;; esac;; esac; "
+            f"sstat -a -P -j \"$raw\" -o JobID,MaxRSS,AveCPU,NTasks 2>/dev/null; echo '{self.SEP}'; "
             f"sacct --expand-patterns -X -P -j \"$1\" -o {self.RECAP} 2>/dev/null || sacct -X -P -j \"$1\" -o {self.RECAP}",
             args=(job,),
         )
         control, steps, live, recap = (part.strip() for part in (out.split(self.SEP) + [""] * 3)[:4])
-        steps, live = self.table(steps), self.table(live)
+        steps, live = self.table(steps, most=11), self.table(live)
         live["rows"] = [row for row in live["rows"] if not row[0].endswith(".extern")]
         usage = None
         main = next((row for row in steps["rows"] if "." not in row[0] and len(row) == 11), None)
         if main:
-            peaks = [row[7] for row in steps["rows"] if len(row) == 11] + [row[1] for row in live["rows"] if len(row) > 1]
-            usage = self.usage(main[2].split(" ")[0], main[9], main[10], main[8], main[6], main[5], peaks)
-        steps = {"columns": steps["columns"][:9], "rows": [row[:9] for row in steps["rows"]]}
+            peaks = [row[6] for row in steps["rows"] if len(row) == 11] + [row[1] for row in live["rows"] if len(row) > 1]
+            usage = self.usage(main[1].split(" ")[0], main[8], main[9], main[7], main[5], main[4], peaks)
+        # Shown as before : the name after the identifier, without the two raw columns.
+        steps = {"columns": steps["columns"][:1] + steps["columns"][10:11] + steps["columns"][1:8],
+                 "rows": [row[:1] + row[10:11] + row[1:8] for row in steps["rows"]]}
         lines = recap.splitlines()
         names = lines[0].split("|") if lines else []
         values = lines[1].split("|", len(names) - 1) if len(lines) > 1 else []
@@ -822,7 +944,7 @@ class Cluster:
         def value(match):
             width, letter = match.groups()
             text = "%" if letter == "%" else values.get(letter, "")
-            return text.zfill(int(width)) if width and text.isdigit() else text
+            return text.zfill(min(int(width), 10)) if width and text.isdigit() else text
         return cls.PATTERN.sub(value, pattern)
 
     def output_path(self, job, stream):
@@ -858,7 +980,10 @@ class Cluster:
         carriage returns) does not cross the connection whole at every refresh."""
         job = self.job_id(job).split("_[")[0]
         lines = self.integer(lines, 10, 2000)
+        stream = "err" if stream == "err" else "out"
         with self.lock:
+            if len(self.outputs) > 2000:
+                self.outputs.clear()
             path = self.outputs.get((job, stream))
         if not path:
             path, pattern = self.output_path(job, stream)
@@ -878,7 +1003,7 @@ class Cluster:
 
     def gpu(self, job):
         """`nvidia-smi` inside a running job (an overlapping step : it takes no resource from the job)."""
-        job = self.job_id(job)
+        job = self.target(job)
         probe = (
             "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw "
             f"--format=csv; echo '{self.SEP}'; "
@@ -888,18 +1013,28 @@ class Cluster:
         gpus, _, apps = out.partition(self.SEP)
         return {"gpus": self.table(gpus, ","), "apps": self.table(apps, ","), "error": err if code else ""}
 
-    def act(self, action, job):
-        """One of `ACTIONS` ; the per-job ones take a validated identifier. Sent once, never repeated."""
+    def act(self, action, job, jobs=None):
+        """One of `ACTIONS` ; the per-job ones take a validated identifier, `cancel_many` a list of them (`jobs`, `MANY` at most :
+        one `scancel` for a whole selection). Sent once, never repeated ; whatever the outcome, what was read of the jobs is dropped."""
         if not self.actions:
             raise PermissionError("job actions are disabled : start the server with --actions")
-        template = self.ACTIONS[action]
-        args = (self.job_id(job),) if '"$1"' in template else ()
-        code, out, err = self.run(template, args=args, once=True)
-        command = template.replace('"$1"', args[0]) if args else template
-        with self.lock:
-            self.cache.clear()
-            self.accounts.clear()
-            self.changes += 1
+        template = self.ACTIONS[action if isinstance(action, str) else ""]
+        if '"$@"' in template:
+            if not isinstance(jobs, list) or not 1 <= len(jobs) <= self.MANY:
+                raise ValueError(f"between 1 and {self.MANY} jobs are expected")
+            args = tuple(self.target(item) for item in jobs)
+            command = template.replace('"$@"', f"{args[0]} … ({len(args)} jobs)" if len(args) > 1 else args[0])
+        else:
+            args = (self.target(job),) if '"$1"' in template else ()
+            command = template.replace('"$1"', args[0]) if args else template
+        try:
+            code, out, err = self.run(template, args=args, once=True)
+        finally:
+            with self.lock:
+                self.cache.clear()
+                # Out of date, not forgotten : still the finished jobs to show if the accounting fails next (`jobs`).
+                self.accounts = {days: (NEVER, account) for days, (_, account) in self.accounts.items()}
+                self.changes += 1
         return {"ok": code == 0, "command": command, "output": (out + "\n" + err).strip()}
 
     ##### Sizing and waits #####
@@ -914,8 +1049,9 @@ class Cluster:
         return {partition: {"median": statistics.median(waits), "jobs": len(waits)} for partition, waits in found.items()}
 
     @classmethod
-    def advice(cls, history):
+    def advice(cls, history, pattern=False):
         """What the finished jobs of a same name used against what they asked for, and a smaller request when one fits.
+        With `pattern` (`--ultra`, where a sweep is thousands of names), of a same name once its numbers are left out.
 
         Only the completed jobs give the figures (a failed job may have stopped early). A request is suggested when
         it would be at most 80 % of the present one : the memory peak plus 20 %, in whole GiB ; the longest run plus
@@ -926,7 +1062,7 @@ class Cluster:
         CPUs. The `ADVISED` names with the most jobs."""
         names = {}
         for job in history:
-            names.setdefault(job["name"], []).append(job)
+            names.setdefault(cls.NUMBERS.sub("#", job["name"]) if pattern else job["name"], []).append(job)
         rows = []
         for name, jobs in names.items():
             done = [job for job in jobs if job["state"] == "COMPLETED"]
@@ -941,6 +1077,7 @@ class Cluster:
                 "mem_peak": peak, "mem_req": asked, "elapsed": max(job["elapsed"] for job in done),
                 "limit": max(job["limit"] for job in done), "cpus": max(job["cpus"] for job in done), "cpu_used": used,
                 "tasks": max(job.get("tasks", 0) for job in jobs), "mem": None, "time": None, "cores": None,
+                "cpu_back": 0.0, "mem_back": 0.0,
             }
             single = row["tasks"] <= 1
             if peak and asked and not row["oom"] and single:
@@ -952,6 +1089,15 @@ class Cluster:
             if used is not None and row["cpus"] > 1 and single:
                 wanted = max(1, math.ceil(1.2 * used))
                 row["cores"] = wanted if wanted <= 0.8 * row["cpus"] else None
+            # What the smaller requests would have given back : for each job of the name, whatever its end, what it held above the
+            # suggestion, over the part of its run inside the period (`counted`, as the totals count it) — CPU-hours, GiB-hours.
+            for job in jobs:
+                held = (job.get("counted", job["elapsed"]) or 0) / 3600
+                if row["cores"]:
+                    row["cpu_back"] += max(0, job["cpus"] - row["cores"]) * held
+                if row["mem"] and job["mem_req"]:
+                    row["mem_back"] += max(0.0, job["mem_req"] / 2**30 - row["mem"]) * held
+            row["cpu_back"], row["mem_back"] = round(row["cpu_back"], 2), round(row["mem_back"], 2)
             rows.append(row)
         rows.sort(key=lambda row: (-row["jobs"], row["name"]))
         return rows[:cls.ADVISED]
@@ -1005,11 +1151,12 @@ class Cluster:
         """Appends a sample to the file of `--keep` ; a sample written twice (after a reading of the GPUs) is read once, the last.
 
         Best effort : a file that cannot be written (disk full, directory removed) is said once in the terminal,
-        and the sampling goes on."""
+        and the sampling goes on. Written outside the lock of the cluster : a slow disk does not hold the page up
+        (a sample is one short line added at the end of the file)."""
         if not self.keep:
             return
         try:
-            with self.lock, os.fdopen(os.open(self.keep, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600), "a") as file:
+            with os.fdopen(os.open(self.keep, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600), "a") as file:
                 file.write(json.dumps(sample) + "\n")
         except OSError as error:
             if not self.warned:
@@ -1051,8 +1198,12 @@ class Cluster:
             try:
                 if self.connected():
                     self.live()
-            except Exception:
-                pass
+                self.muted = False
+            except Exception as error:
+                # Said once per run of failures, not at each sample.
+                if not self.muted:
+                    self.muted = True
+                    print(f"Resources : a background sample could not be taken ({type(error).__name__}) ; the sampling goes on.", flush=True)
 
     @classmethod
     def timeline(cls, jobs, days, now):
@@ -1082,7 +1233,7 @@ class Cluster:
         return {"start": first, "step": width, **{name: [round(value, 3) for value in values] for name, values in series.items()}}
 
     @classmethod
-    def rates(cls, known, steps, stamp, alive=()):
+    def rates(cls, known, steps, stamp, alive=(), pause=600):
         """The CPUs each running step uses, from its cumulated CPU time at successive readings : the new state, the total
         over the jobs whose steps all have a rate, and the number of jobs left out of it (a job with a step not
         measured yet is not counted for a part of its use, which would read as idle).
@@ -1096,12 +1247,12 @@ class Cluster:
         old), and a rate is given only over `SPAN` seconds at least, since a change is dated by the sample that
         saw it : a step has a rate after two minutes or so. A counter that has not moved for `STALE` seconds
         gives 0, and no rate from the moment it moves again until `SPAN` seconds are measured. A new step, a counter that went back (a requeue) or a pause of the sampling of more than ten
-        minutes start over, without a rate. When no step of an `alive` job is in this reading (its node did
+        minutes (`pause` : more when the background sampling is slower than that) start over, without a rate. When no step of an `alive` job is in this reading (its node did
         not answer), its steps keep their state for ten minutes ; a step that ended beside others is dropped."""
         state = {}
         for step, spent in steps.items():
             marks, rate, (moment, before) = known.get(step, ([], None, [stamp, spent]))
-            if spent > before and 0 < stamp - moment <= 600:
+            if spent > before and 0 < stamp - moment <= pause:
                 marks = marks + [[stamp, spent]]
                 while len(marks) > 2 and stamp - marks[1][0] >= cls.WINDOW:
                     marks = marks[1:]
@@ -1119,7 +1270,7 @@ class Cluster:
         answered = {step.partition(".")[0] for step in steps}
         for step, entry in known.items():
             job = step.partition(".")[0]
-            if job in alive and job not in answered and stamp - entry[2][0] <= 600:
+            if job in alive and job not in answered and stamp - entry[2][0] <= pause:
                 state[step] = entry
         jobs = {}
         for step, entry in state.items():
@@ -1177,7 +1328,7 @@ class Cluster:
             with self.lock:
                 rate, missed = None, 0
                 if spent or not running:
-                    self.counters, rate, missed = self.rates(self.counters, spent, stamp, alive)
+                    self.counters, rate, missed = self.rates(self.counters, spent, stamp, alive, max(600, 2 * self.sample + 30))
                 elif measured:
                     rate = 0.0
                 self.gpu_jobs = tuple(holders)
@@ -1324,7 +1475,10 @@ class Cluster:
     def path(self, value, change=False):
         """A normalised absolute path inside one of the storage roots ; for a `change`, inside a personal area only.
 
-        Like a job id, it reaches a script as a positional argument (`"$1"`), never inside its text."""
+        Like a job id, it reaches a script as a positional argument (`"$1"`), never inside its text. With `--no-files`
+        no path is taken : every reading and change of the files goes through here."""
+        if not self.browse:
+            raise PermissionError("the files are not shown : the server was started with --no-files")
         if not isinstance(value, str) or not value.startswith("/") or value.startswith("//") or any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError("invalid path")
         value = posixpath.normpath(value)
@@ -1405,7 +1559,7 @@ class Cluster:
     def measure(self, path):
         """Number and total size of the files under a directory ; a lower bound when the walk is stopped."""
         path = self.path(path)
-        code, out, _ = self.run(
+        code, out, _ = self.heavy(
             f"timeout {self.WALK} nice -n 19 find -H \"$1\" -xdev -type f -printf '%s\\n' 2>/dev/null "
             "| awk '{ n += 1; s += $1 } END { printf \"%.0f %.0f\\n\", n, s }'; echo \"${PIPESTATUS[0]}\"",
             timeout=self.WALK + 20, args=(path,),
@@ -1421,7 +1575,7 @@ class Cluster:
         `find` counts whole days and `+N` means more than N : `+(days - 1)` is « at least `days` days »."""
         path = self.path(path)
         days = self.integer(days, 1, 3650)
-        code, out, _ = self.run(
+        code, out, _ = self.heavy(
             f"timeout {self.WALK} nice -n 19 find -H \"$1\" -xdev -type f -atime +{days - 1} -mtime +{days - 1} "
             f"-printf '%A@|%T@|%s|%P\\0' 2>/dev/null | head -z -n 500; printf '%s' \"${{PIPESTATUS[0]}}\"",
             timeout=self.WALK + 20, args=(path,),
@@ -1442,12 +1596,11 @@ class Cluster:
         first and exactly that many bytes are sent : a file that grows meanwhile (the log of a running job) is
         cut at the size it had."""
         path = self.path(path)
-        with self.long:
-            code, out, _ = self.run(
-                self.sealing() + self.READ + 'size=$(stat -L -c %s -- /dev/fd/3) || exit 2; echo "$size"; '
-                f'[ "$size" -le {self.DOWNLOAD} ] && head -c "$size" <&3',
-                timeout=300, args=(path,), raw=True,
-            )
+        code, out, _ = self.heavy(
+            self.sealing() + self.READ + 'size=$(stat -L -c %s -- /dev/fd/3) || exit 2; echo "$size"; '
+            f'[ "$size" -le {self.DOWNLOAD} ] && head -c "$size" <&3',
+            timeout=300, args=(path,), raw=True,
+        )
         cut = out.find(b"\n")
         size, data = out[:max(cut, 0)], memoryview(out)[cut + 1:]
         if code in (3, 4):
@@ -1493,20 +1646,25 @@ class Cluster:
         The areas and the protected paths are resolved once, and the time left is tested before anything else for
         each entry : the checks cost one process per directory, not per entry. The script is sent once (a rename
         sent again would answer « no such file ») ; if the connection drops meanwhile, the outcomes received are
-        returned with a warning."""
+        returned with a warning. A directory given with `--root` stays read-only under any name : its real path is
+        handed to the script (`shut`), which refuses what really is inside it, reached through a link of a personal area too, and the directory itself or one that holds it (`protected`)."""
         self.permit()
-        roots, keep = (" ".join(shlex.quote(item) for item in items) for items in (self.personal().values(), self.PROTECTED))
-        code, out, err = self.run(f"roots=({roots}); keep=({keep}); budget={self.WALK}; " + self.sealing() + self.SHIELD + self.TOOLS + script,
-                                  timeout=self.WALK + 20, args=args, once=True)
-        results = [dict(zip(("status", "path", "message"), (line.split("\t", 2) + ["", ""])[:3])) for line in out.splitlines() if line]
+        closed = [real for name, real in self.areas()[1].items() if name not in self.site.AREAS]
+        roots, keep, shut = (" ".join(shlex.quote(item) for item in items) for items in (self.personal().values(), self.PROTECTED, closed))
+        try:
+            code, out, err = self.run(f"roots=({roots}); keep=({keep}); shut=({shut}); budget={self.WALK}; " + self.sealing() + self.SHIELD + self.TOOLS + script,
+                                      timeout=self.WALK + 20, args=args, once=True)
+        finally:
+            with self.lock:
+                self.outputs.clear()
+        # One outcome per line of the script : a name may hold a line separator of Unicode, which is not the end of a line here.
+        results = [dict(zip(("status", "path", "message"), (line.split("\t", 2) + ["", ""])[:3])) for line in out.split("\n") if line]
         ok = code == 0 and bool(results) and all(result["status"] == "done" for result in results)
         error = "" if results else (err or "no answer from the cluster")
         if code == 4 and not results:
             error = self.HOMELESS
         if code == 255:
             error = "the SSH connection dropped during the change : the outcomes listed may be incomplete, check the directory"
-        with self.lock:
-            self.outputs.clear()
         return {"ok": ok, "results": results, "error": error}
 
     def remove(self, paths):
@@ -1545,19 +1703,42 @@ class Handler(BaseHTTPRequestHandler):
     hosts = ()
     door = None
     OPENING = 120
+    # The seconds a connection has to send its request : one that stays silent does not keep a thread (`reply` lifts the limit,
+    # the answer of the cluster and the sending of a large file take the time they need).
+    timeout = 15
+
+    def setup(self):
+        """The whole request has twice the time given to a silence : a connection that sends a byte now and then keeps no thread either."""
+        super().setup()
+        self.limit = threading.Timer(2 * self.timeout, self.cut)
+        self.limit.daemon = True
+        self.limit.start()
+
+    def cut(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def finish(self):
+        self.limit.cancel()
+        super().finish()
 
     def log_message(self, *args):
         """No request log (job names and paths stay out of the terminal)."""
 
     def handle(self):
-        """A browser that left before its answer (a reload, a closed tab : Chromium drops its pending requests) is not an error of the server."""
+        """A browser that left before its answer (a reload, a closed tab : Chromium drops its pending requests) is not an error of the server,
+        nor is a connection that did not send its request in time."""
         try:
             super().handle()
-        except ConnectionError:
+        except OSError:
             pass
 
     def reply(self, status, payload, content="application/json"):
         body = payload if isinstance(payload, (bytes, memoryview)) else json.dumps(payload).encode()
+        self.connection.settimeout(None)
+        self.limit.cancel()
         self.send_response(status)
         self.send_header("Content-Type", content if content.endswith("octet-stream") else content + "; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -1566,7 +1747,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; worker-src blob:; frame-ancestors 'none'",
+            "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; worker-src blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
         )
         self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
@@ -1664,8 +1845,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(405, {"error": str(error)})
         except NotConnected:
             return self.reply(503, {"error": "not_connected"})
-        except Busy:
-            return self.reply(429, {"error": "the SSH connection refused the command (too many sessions at once, or it dropped) ; try again"})
+        except Busy as error:
+            return self.reply(429, {"error": str(error) or "the SSH connection refused the command (too many sessions at once, or it dropped) ; try again"})
         except subprocess.TimeoutExpired:
             return self.reply(504, {"error": "the cluster did not answer in time"})
         except KeyError:
@@ -1679,7 +1860,8 @@ class Handler(BaseHTTPRequestHandler):
 
     ROUTES = {
         "/api/status": lambda cluster, args: cluster.status(),
-        "/api/jobs": lambda cluster, args: cluster.jobs(Cluster.integer(args.get("days", 1), 1, 30), args.get("fresh") is True, args.get("quiet") is True),
+        "/api/jobs": lambda cluster, args: Cluster.brief(cluster.jobs(Cluster.integer(args.get("days", 1), 1, 30), args.get("fresh") is True, args.get("quiet") is True),
+                                                          args.get("since")),
         "/api/job": lambda cluster, args: cluster.info(args.get("id")),
         "/api/output": lambda cluster, args: cluster.output(args.get("id"), args.get("stream", "out"), args.get("lines", 200)),
         "/api/gpu": lambda cluster, args: cluster.gpu(args.get("id")),
@@ -1695,7 +1877,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/preview": lambda cluster, args: cluster.preview(args.get("path"), args.get("end", "tail")),
         "/api/measure": lambda cluster, args: cluster.measure(args.get("path")),
         "/api/unused": lambda cluster, args: cluster.unused(args.get("path"), args.get("days", 60)),
-        "/api/action": lambda cluster, args: cluster.act(args["action"], args.get("id")),
+        "/api/action": lambda cluster, args: cluster.act(args["action"], args.get("id"), args.get("ids")),
         "/api/download": lambda cluster, args: cluster.download(args.get("path")),
         "/api/remove": lambda cluster, args: cluster.remove(args.get("paths")),
         "/api/rename": lambda cluster, args: cluster.rename(args.get("path"), args.get("name")),
@@ -1723,6 +1905,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": "bad request"})
         length = int(length)
         raw = self.rfile.read(length)
+        self.limit.cancel()
+        if len(raw) != length:
+            # Cut before its end (`cut`, or a client that left) : nothing is done with half a request.
+            return None
 
         def call():
             # A fixed message : the text of a decoding error quotes bytes of the body, which can hold a token.
@@ -1735,6 +1921,35 @@ class Handler(BaseHTTPRequestHandler):
             return route(self.cluster, args)
 
         return self.guarded(call)
+
+
+class Server(ThreadingHTTPServer):
+    """The HTTP server : a thread per request, `ROOM` of them at most. A connection beyond is closed at once, so that connections
+    opened from this computer and left silent use up neither the threads nor the files of the process ; each is closed anyway
+    when it has not sent its request in time (`Handler.timeout`)."""
+
+    daemon_threads = True
+    ROOM = 64
+    request_queue_size = ROOM
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.room = threading.BoundedSemaphore(self.ROOM)
+
+    def process_request(self, request, client_address):
+        if not self.room.acquire(blocking=False):
+            return self.shutdown_request(request)
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.room.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.room.release()
 
 
 def main():
@@ -1752,6 +1967,13 @@ def main():
                         help="allow the job actions (kill, kill pending, kill all, SIGTERM, hold, release, requeue) : the page only watches without it")
     parser.add_argument("--no-actions", action="store_true",
                         help="the page only watches : the default since 0.1.6, kept so that a command written for an earlier version still starts")
+    parser.add_argument("--no-files", action="store_true",
+                        help="no Storage view : the files of the account are neither listed, previewed, downloaded nor changed from the page "
+                             "(the quotas stay in Resources, and the panel of a job still reads its output file)")
+    parser.add_argument("--ultra", action="store_true",
+                        help="for hundreds to thousands of jobs : the queue and the finished jobs drawn as mosaics (one square per job, grouped by name, filtered by state), "
+                             "up to 5000 finished jobs listed, "
+                             "the accounting database read once a minute at most when jobs keep leaving the queue")
     parser.add_argument("--sample", type=int, default=0, metavar="SECONDS",
                         help="start with the background sampling on : a sample of the resources of the running jobs every SECONDS (30 to 3600), "
                              "view open or not ; off without it, and turned on, off or changed from the Resources view")
@@ -1767,6 +1989,8 @@ def main():
         parser.error("--sample takes {} to {} seconds".format(*Cluster.PACE))
     if args.actions and args.no_actions:
         parser.error("--actions and --no-actions cannot be given together")
+    if args.no_files and (args.writable or roots):
+        parser.error("--no-files shows no file : it cannot be given with --writable nor --root")
 
     try:
         site = Site.load(args.site)(os.environ)
@@ -1778,15 +2002,15 @@ def main():
     if host.startswith("-"):
         parser.error("--ssh-host takes the alias of the login node, not an option of ssh")
     try:
-        Handler.cluster = Cluster(host, roots, writable=args.writable, actions=args.actions, sample=args.sample, keep=args.keep, site=site)
+        Handler.cluster = Cluster(host, roots, writable=args.writable, actions=args.actions, sample=args.sample, keep=args.keep, site=site,
+                                  ultra=args.ultra, files=not args.no_files)
     except (OSError, ValueError) as error:
         parser.exit(1, f"Cannot use the file of --keep : {getattr(error, 'strerror', None) or error}. Nothing was changed.\n")
     threading.Thread(target=Handler.cluster.sample_forever, daemon=True).start()
     Handler.token = secrets.token_urlsafe(24)
     Handler.page = Path(__file__).resolve().parent / "index.html"
-    ThreadingHTTPServer.daemon_threads = True
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        server = Server(("127.0.0.1", args.port), Handler)
     except OSError as error:
         parser.exit(1, f"Cannot listen on port {args.port} ({error.strerror}) : another monitor may be running ; stop it or use --port.\n")
     port = server.server_address[1]
@@ -1794,8 +2018,10 @@ def main():
     Handler.hosts = (f"127.0.0.1:{port}", f"localhost:{port}") + (("127.0.0.1", "localhost") if port == 80 else ())
     address = f"http://127.0.0.1:{port}/#t={Handler.token}"
     print(f"Cluster monitor {VERSION}, {site.NAME} (ssh {host}) : {address}\n(loopback only ; the token changes at every launch ; Ctrl+C to stop)", flush=True)
-    print("Storage : " + ("files can be deleted, renamed and moved (--writable)." if args.writable else "read-only (add --writable to manage files)."), flush=True)
-    print("Jobs : " + ("can be killed, held and requeued from the page (--actions)." if args.actions else "watched only (add --actions to kill, hold and requeue)."), flush=True)
+    print("Storage : " + ("not shown (--no-files)." if args.no_files else "files can be deleted, renamed and moved (--writable)." if args.writable
+                          else "read-only (add --writable to manage files)."), flush=True)
+    print("Jobs : " + ("can be killed, held and requeued from the page (--actions)." if args.actions else "watched only (add --actions to kill, hold and requeue).")
+          + (" Many jobs (--ultra) : drawn as mosaics, grouped by name, 5000 finished jobs listed." if args.ultra else ""), flush=True)
     print("Resources : " + (f"sampled every {args.sample} s in the background, view open or not (--sample ; changed in the Resources view)" if args.sample
                             else "sampled while the view is open (background sampling off : turned on in the Resources view, or with --sample)")
           + (f" ; kept in {args.keep} (--keep)." if args.keep else " ; kept in memory only (--keep to keep a day over a restart)."), flush=True)
